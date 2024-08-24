@@ -1,4 +1,7 @@
 from flask import Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
+from flask_admin import Admin
+from flask_admin.contrib.sqla import ModelView
 import sqlite3
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
@@ -13,13 +16,31 @@ import datetime
 
 app = Flask(__name__)
 
-
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///my_database.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
 
 JWT_SECRET = 'Babak2324723'
 JWT_ALGORITHM = 'HS256' 
 
 private_key = RSA.generate(2048)
 public_key = private_key.publickey()
+
+class License(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(80), nullable=False, unique=True)
+    issuer = db.Column(db.String(120), nullable=False)
+    owner = db.Column(db.String(120), nullable=False)
+    project = db.Column(db.String(120), nullable=False)
+    is_active = db.Column(db.Boolean, default=False)
+    license = db.Column(db.String(500), nullable=False)
+
+class LicenseAdmin(ModelView):
+    column_list = ['code', 'issuer', 'owner', 'project', 'is_active']
+    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license']
+
+admin.add_view(LicenseAdmin(License, db.session))
 
 def token_required(f):
     def wrapper(*args, **kwargs):
@@ -64,15 +85,11 @@ def get_public_key():
 @token_required
 def is_active():
     data = request.json
-    conn = sqlite3.connect('my_database.db')
-    cursor = conn.cursor()
     code = data.get('code')
-    code_exist_query = f"SELECT * FROM licences WHERE code=?"
-    cursor.execute(code_exist_query, (code,))
-    code_from_db = cursor.fetchall()
-    if not code_from_db:
+    license_record = License.query.filter_by(code=code).first()
+    if not license_record:
         return jsonify({'result': False})
-    if  code_from_db[0][4] == 1:
+    if  license_record.is_active:
         return jsonify({'result': True})
     else:
         return jsonify({'result': False})
@@ -85,20 +102,16 @@ def sign_device_id(device_id: str) -> str:
 @app.route('/activate', methods=['POST'])
 @token_required
 def register_activate_request():
-    conn = sqlite3.connect('my_database.db')
-    cursor = conn.cursor()
     data = request.json
     code = data.get('code')
-    code_exist_query = f"SELECT * FROM licences WHERE code=?"
-    cursor.execute(code_exist_query, (code,))
-    code_from_db = cursor.fetchall()
+
+    existing_license = License.query.filter_by(code=code).first()
+
     encrypted_text = None
-    app.logger.error(code)
-    if code_from_db:
-        app.logger.error('code exist')
+    #app.logger.error(code)
+    if existing_license:
         return jsonify({'error':'Already activated'}), 403
     else:
-        app.logger.error('1')
         issuer = data.get('issuer')
         owner = data.get('owner')
         project = data.get('project')
@@ -106,11 +119,13 @@ def register_activate_request():
         license_data = f"{code}"
         #encrypted_text = encrypt(license_data)
         encrypted_text = sign_device_id(license_data)
-        cursor.execute("INSERT INTO licences (code, issuer, owner, project, is_active, license) VALUES (?,?,?,?,?,?)", (code, issuer, owner, project, True, encrypted_text))
-        conn.commit()
-        cursor.close()
-        app.logger.error('2')
-    conn.close
+        new_license = License(
+            code=code, issuer=issuer, owner=owner, project=project,
+            is_active=True, license=encrypted_text
+            )
+        db.session.add(new_license)
+        db.session.commit()
+    
     app.logger.error(encrypted_text)
     return  jsonify({'encrypted_license': encrypted_text})
 
@@ -118,4 +133,5 @@ def register_activate_request():
 
 
 if __name__ == '__main__':
+    db.create_all()
     app.run(debug=True)
