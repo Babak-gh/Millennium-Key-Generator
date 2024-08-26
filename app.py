@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
@@ -13,12 +13,21 @@ import logging
 import os
 import jwt
 import datetime
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_bcrypt import Bcrypt
+
 
 app = Flask(__name__)
 
+app.config['SECRET_KEY'] = 'your_secret_key' 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(app.instance_path, 'my_database.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+
 admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
 
 JWT_SECRET = 'Babak2324723'
@@ -26,6 +35,18 @@ JWT_ALGORITHM = 'HS256'
 
 private_key = RSA.generate(2048)
 public_key = private_key.publickey()
+
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    password = db.Column(db.String(150), nullable=False)
+
+    def __repr__(self):
+        return f'<User {self.username}>'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
 
 class License(db.Model):
     __tablename__ = 'licences'
@@ -41,10 +62,24 @@ class LicenseAdmin(ModelView):
     column_list = ['code', 'issuer', 'owner', 'project', 'is_active']
     form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license']
 
+class AuthenticatedModelView(ModelView):
+    def is_accessible(self):
+        return current_user.is_authenticated
+
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('login', next=request.url))
+
 admin.add_view(LicenseAdmin(License, db.session))
+admin.add_view(AuthenticatedModelView(User, db.session))
 
 with app.app_context():
      db.create_all()
+
+     if not User.query.first():
+        hashed_password = bcrypt.generate_password_hash('Babak2324723').decode('utf-8')
+        new_user = User(username='admin', password=hashed_password) 
+        db.session.add(new_user)
+        db.session.commit()
 
 def token_required(f):
     def wrapper(*args, **kwargs):
@@ -60,6 +95,24 @@ def token_required(f):
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        if user and bcrypt.check_password_hash(user.password, password):
+            login_user(user)
+            return redirect(url_for('admin.index'))
+        return 'Invalid credentials'
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
 
 @app.route('/register_device', methods=['POST'])
 def register_device():
