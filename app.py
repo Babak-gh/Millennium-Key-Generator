@@ -16,7 +16,7 @@ import datetime
 
 app = Flask(__name__)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////app/instance/my_database.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(app.instance_path, 'my_database.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
@@ -42,6 +42,9 @@ class LicenseAdmin(ModelView):
     form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license']
 
 admin.add_view(LicenseAdmin(License, db.session))
+
+with app.app_context():
+     db.create_all()
 
 def token_required(f):
     def wrapper(*args, **kwargs):
@@ -134,5 +137,4 @@ def register_activate_request():
 
 
 if __name__ == '__main__':
-    db.create_all()
     app.run(debug=True)
