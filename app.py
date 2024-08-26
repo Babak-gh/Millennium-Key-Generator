@@ -16,7 +16,7 @@ import datetime
 
 app = Flask(__name__)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app/my_database.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////app/instance/my_database.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
