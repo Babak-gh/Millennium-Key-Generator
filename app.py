@@ -28,7 +28,7 @@ private_key = RSA.generate(2048)
 public_key = private_key.publickey()
 
 class License(db.Model):
-    __tablename__ = 'Licences'
+    __tablename__ = 'licences'
     id = db.Column(db.Integer, primary_key=True)
     code = db.Column(db.String(80), nullable=False, unique=True)
     issuer = db.Column(db.String(120), nullable=False)
