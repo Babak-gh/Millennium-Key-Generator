@@ -69,7 +69,7 @@ class AuthenticatedModelView(ModelView):
     def inaccessible_callback(self, name, **kwargs):
         return redirect(url_for('login', next=request.url))
 
-admin.add_view(LicenseAdmin(License, db.session))
+admin.add_view(AuthenticatedModelView(License, db.session))
 admin.add_view(AuthenticatedModelView(User, db.session))
 
 with app.app_context():
