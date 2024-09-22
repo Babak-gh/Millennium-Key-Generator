@@ -28,6 +28,9 @@ jobs:
       - name: Build and push Docker compose service
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
         run: |
           docker-compose build
           docker-compose push
