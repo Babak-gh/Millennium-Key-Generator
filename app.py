@@ -2,12 +2,9 @@ from flask import Flask, jsonify, request, render_template, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
-import sqlite3
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
 from Crypto.Hash import SHA256
 from Crypto.Signature import PKCS1_v1_5
-from Crypto.Random import get_random_bytes
 import base64
 import logging
 import os
@@ -19,7 +16,7 @@ from flask_bcrypt import Bcrypt
 
 app = Flask(__name__)
 
-app.config['SECRET_KEY'] = 'your_secret_key' 
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_secret_key')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(app.instance_path, 'my_database.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -30,7 +27,7 @@ login_manager.login_view = 'login'
 
 admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
 
-JWT_SECRET = 'Babak2324723'
+JWT_SECRET = os.environ.get('JWT_SECRET', 'default_jwt_secret')
 JWT_ALGORITHM = 'HS256' 
 
 private_key = RSA.generate(2048)
@@ -47,6 +44,17 @@ class User(db.Model, UserMixin):
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
+
+class Issuer(db.Model):
+    __tablename__ = 'issuer'
+    id = db.Column(db.Integer, primary_key=True)
+    issuer = db.Column(db.String(120), nullable=False, unique=True)
+    allowed_licenses = db.column(db.Integer, default = 0)
+
+class IssuerAdmin(ModelView):
+    column_list = ['id', 'issuer', 'allowed_licenses']
+    form_columns = ['id', 'issuer', 'allowed_licenses']
+
 
 class License(db.Model):
     __tablename__ = 'licences'
@@ -71,12 +79,13 @@ class AuthenticatedModelView(ModelView):
 
 admin.add_view(AuthenticatedModelView(License, db.session))
 admin.add_view(AuthenticatedModelView(User, db.session))
+admin.add_view(AuthenticatedModelView(Issuer, db.session))
 
 with app.app_context():
      db.create_all()
 
      if not User.query.first():
-        hashed_password = bcrypt.generate_password_hash('Babak2324723').decode('utf-8')
+        hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS' , 'default_pass')).decode('utf-8')
         new_user = User(username='admin', password=hashed_password) 
         db.session.add(new_user)
         db.session.commit()
@@ -165,22 +174,27 @@ def register_activate_request():
     existing_license = License.query.filter_by(code=code).first()
 
     encrypted_text = None
-    #app.logger.error(code)
+    
     if existing_license:
         return jsonify({'error':'Already activated'}), 403
     else:
         issuer = data.get('issuer')
+        existing_issuer = Issuer.query.filter_by(issuer=issuer).first()
+        if not existing_issuer:
+            return jsonify({'error':'You are not allowed to get a license'}), 403
+        if existing_issuer.allowed_licenses == 0:
+            return jsonify({'error':'You do not have enough licenses'}), 403
+        
         owner = data.get('owner')
         project = data.get('project')
-        #license_data = f"LICENSE-{code}-{os.urandom(16).hex()}"
         license_data = f"{code}"
-        #encrypted_text = encrypt(license_data)
         encrypted_text = sign_device_id(license_data)
         new_license = License(
             code=code, issuer=issuer, owner=owner, project=project,
             is_active=True, license=encrypted_text
             )
         db.session.add(new_license)
+        existing_issuer.allowed_licenses -= 1
         db.session.commit()
     
     app.logger.error(encrypted_text)
