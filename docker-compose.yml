@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  flask_app:
+    image: ${DOCKER_USERNAME}/millennium:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_PASS=${ADMIN_PASS}
+    volumes:
+      - ./instance:/app/instance
