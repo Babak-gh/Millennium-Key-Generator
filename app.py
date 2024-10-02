@@ -49,7 +49,7 @@ class Issuer(db.Model):
     __tablename__ = 'issuer'
     id = db.Column(db.Integer, primary_key=True)
     issuer = db.Column(db.String(120), nullable=False, unique=True)
-    allowed_licenses = db.column(db.Integer, default = 0)
+    allowed_licenses = db.Column(db.Integer, default = 0)
 
 class IssuerAdmin(ModelView):
     column_list = ['id', 'issuer', 'allowed_licenses']
