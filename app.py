@@ -238,11 +238,18 @@ def register_activate_request():
         project = data.get('project')
         license_data = f"{code}"
         encrypted_text = sign_device_id(license_data)
-        new_license = License(
-            code=code, issuer=issuer, owner=owner, project=project,
-            is_active=True, license=encrypted_text
-            )
-        db.session.add(new_license)
+        if existing_license:
+            existing_license.issuer = issuer
+            existing_license.owner = owner
+            existing_license.project = project
+            existing_license.is_active = True
+            existing_license.license = encrypted_text
+        else:
+            new_license = License(
+                code=code, issuer=issuer, owner=owner, project=project,
+                is_active=True, license=encrypted_text
+                )
+            db.session.add(new_license)
         existing_issuer.allowed_licenses -= 1
         db.session.commit()
     else:
