@@ -77,10 +77,24 @@ class AuthenticatedModelView(ModelView):
 
     def inaccessible_callback(self, name, **kwargs):
         return redirect(url_for('login', next=request.url))
+    
+#### Update Android Code ###
+class Version(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    version_code = db.Column(db.Integer, nullable=False)
+    release_date = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
+    apk_url = db.Column(db.String(255), nullable=False)
+    variant = db.Column(db.Text, nullable=True)
+
+class VersionAdmin(ModelView):
+    column_list = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
+    form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
+
 
 admin.add_view(AuthenticatedModelView(License, db.session))
 admin.add_view(AuthenticatedModelView(User, db.session))
 admin.add_view(AuthenticatedModelView(Issuer, db.session))
+admin.add_view(AuthenticatedModelView(Version, db.session))
 
 with app.app_context():
      db.create_all()
@@ -250,6 +264,35 @@ def check_code_in_csv(code):
                     return True  # Code found
 
     return False  # Code not found
+
+
+### Update Android APIs ###
+
+@app.route('/check_update', methods=['POST'])
+@token_required
+def check_update():
+    variant = request.json.get('variant')
+    version_code = request.json.get('version_code')
+
+    latest_version = Version.query.filter_by(variant = variant).order_by(Version.id.desc()).first()
+    if not latest_version:
+        return jsonify({'error': 'No version available'}), 404
+
+    if version_code < latest_version.version_code:
+        return jsonify({
+            'version_code': latest_version.version_code,
+            'apk_url': latest_version.apk_url
+        }), 200
+    else:
+        return jsonify({'error': 'You have the latest version'}), 404
+
+@app.route('/download_apk', methods=['GET'])
+def download_apk():
+    variant = request.args.get('variant')
+    latest_version = Version.query.filter_by(variant = variant).order_by(Version.id.desc()).first()
+    if latest_version:
+        return redirect(latest_version.apk_url)
+    return jsonify({'error': 'No APK available'}), 404
 
 
 
