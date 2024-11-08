@@ -128,7 +128,7 @@ class Babak(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     version_code = db.Column(db.Integer, nullable=False)
     release_date = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now(datetime.timezone.utc))
-    apk_url = db.Column(db.String(255), nullable=False, unique=True)
+    apk_url = db.Column(db.String(255), nullable=False)
     variant = db.Column(db.Text, nullable=True)
 
 class BabakAdmin(AdminOnlyModelView):
