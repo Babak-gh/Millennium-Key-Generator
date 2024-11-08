@@ -57,6 +57,10 @@ class User(db.Model, UserMixin):
 
     def __repr__(self):
         return f'<User {self.username}>'
+    
+class UserAdmin(AdminOnlyModelView):
+    column_list = ['username', 'password', 'is_admin']
+    form_columns = ['username', 'password', 'is_admin']
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -108,7 +112,7 @@ class Version(db.Model):
 
 
 admin.add_view(LicenseAdmin(License, db.session))
-admin.add_view(AdminOnlyModelView(User, db.session))
+admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(AdminOnlyModelView(Version, db.session))
 
