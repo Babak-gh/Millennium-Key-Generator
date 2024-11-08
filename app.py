@@ -34,10 +34,26 @@ JWT_ALGORITHM = 'HS256'
 private_key = RSA.generate(2048)
 public_key = private_key.publickey()
 
+class AuthenticatedModelView(ModelView):
+    def is_accessible(self):
+        return current_user.is_authenticated
+
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('login', next=request.url))
+    
+    
+class AdminOnlyModelView(ModelView):
+    def is_accessible(self):
+        return current_user.is_authenticated and current_user.is_admin
+
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('login', next=request.url))
+
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), unique=True, nullable=False)
     password = db.Column(db.String(150), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
 
     def __repr__(self):
         return f'<User {self.username}>'
@@ -51,10 +67,16 @@ class Issuer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     issuer = db.Column(db.String(120), nullable=False, unique=True)
     allowed_licenses = db.Column(db.Integer, default = 0)
+    created_by = db.Column(db.String(150), nullable=False)
 
-class IssuerAdmin(ModelView):
-    column_list = ['id', 'issuer', 'allowed_licenses']
+class IssuerAdmin(AuthenticatedModelView):
+    column_list = ['id', 'issuer', 'allowed_licenses', 'created_by']
     form_columns = ['id', 'issuer', 'allowed_licenses']
+    
+    def on_model_change(self, form, model, is_created):
+        if is_created:
+            model.created_by = current_user.username
+        super(IssuerAdmin, self).on_model_change(form, model, is_created)
 
 
 class License(db.Model):
@@ -65,24 +87,20 @@ class License(db.Model):
     owner = db.Column(db.String(120), nullable=False)
     project = db.Column(db.String(120), nullable=False)
     is_active = db.Column(db.Boolean, default=False)
+    created_date = db.Column(db.DateTime, nullable=False)
     license = db.Column(db.String(500), nullable=False)
 
 class LicenseAdmin(ModelView):
-    column_list = ['code', 'issuer', 'owner', 'project', 'is_active']
-    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license']
+    column_list = ['code', 'issuer', 'owner', 'project', 'is_active', 'license', 'created_date']
+    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license', 'created_date']
 
-class AuthenticatedModelView(ModelView):
-    def is_accessible(self):
-        return current_user.is_authenticated
 
-    def inaccessible_callback(self, name, **kwargs):
-        return redirect(url_for('login', next=request.url))
     
 #### Update Android Code ###
 class Version(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     version_code = db.Column(db.Integer, nullable=False)
-    release_date = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
+    release_date = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now(datetime.timezone.utc))
     apk_url = db.Column(db.String(255), nullable=False)
     variant = db.Column(db.Text, nullable=True)
 
@@ -91,17 +109,17 @@ class VersionAdmin(ModelView):
     form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
 
 
-admin.add_view(AuthenticatedModelView(License, db.session))
-admin.add_view(AuthenticatedModelView(User, db.session))
-admin.add_view(AuthenticatedModelView(Issuer, db.session))
-admin.add_view(AuthenticatedModelView(Version, db.session))
+admin.add_view(AdminOnlyModelView(License, db.session))
+admin.add_view(AdminOnlyModelView(User, db.session))
+admin.add_view(IssuerAdmin(Issuer, db.session))
+admin.add_view(AdminOnlyModelView(Version, db.session))
 
 with app.app_context():
      db.create_all()
 
      if not User.query.first():
         hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS' , 'default_pass')).decode('utf-8')
-        new_user = User(username='admin', password=hashed_password) 
+        new_user = User(username='admin', password=hashed_password, is_admin=True) 
         db.session.add(new_user)
         db.session.commit()
 
@@ -247,7 +265,7 @@ def register_activate_request():
         else:
             new_license = License(
                 code=code, issuer=issuer, owner=owner, project=project,
-                is_active=True, license=encrypted_text
+                is_active=True, license=encrypted_text, created_date=datetime.datetime.now(datetime.timezone.utc)
                 )
             db.session.add(new_license)
         existing_issuer.allowed_licenses -= 1
@@ -276,7 +294,6 @@ def check_code_in_csv(code):
 ### Update Android APIs ###
 
 @app.route('/check_update', methods=['POST'])
-@token_required
 def check_update():
     variant = request.json.get('variant')
     version_code = request.json.get('version_code')
