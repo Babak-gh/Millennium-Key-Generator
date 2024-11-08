@@ -53,7 +53,7 @@ class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), unique=True, nullable=False)
     password = db.Column(db.String(150), nullable=False)
-    is_admin = db.Column(db.Boolean, default=False)
+    is_admin = db.Column(db.Boolean, nullable=False, default=False)
 
     def __repr__(self):
         return f'<User {self.username}>'
@@ -70,8 +70,8 @@ class Issuer(db.Model):
     created_by = db.Column(db.String(150), nullable=True)
 
 class IssuerAdmin(AuthenticatedModelView):
-    column_list = ['id', 'issuer', 'allowed_licenses', 'created_by']
-    form_columns = ['id', 'issuer', 'allowed_licenses']
+    column_list = ['issuer', 'allowed_licenses', 'created_by']
+    form_columns = ['issuer', 'allowed_licenses']
     
     def on_model_change(self, form, model, is_created):
         if is_created:
@@ -95,8 +95,6 @@ class LicenseAdmin(AdminOnlyModelView):
     form_columns = ['code', 'issuer', 'owner', 'project', 'is_active','created_date', 'license']
 
 
-    
-#### Update Android Code ###
 class Version(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     version_code = db.Column(db.Integer, nullable=False)
@@ -104,9 +102,9 @@ class Version(db.Model):
     apk_url = db.Column(db.String(255), nullable=False)
     variant = db.Column(db.Text, nullable=True)
 
-class VersionAdmin(ModelView):
-    column_list = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
-    form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
+#class VersionAdmin(ModelView):
+ #   column_list = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
+ #   form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
 
 
 admin.add_view(LicenseAdmin(License, db.session))
