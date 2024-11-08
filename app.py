@@ -13,6 +13,7 @@ import csv
 import datetime
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
+from wtforms import BooleanField, ValidationError
 
 
 app = Flask(__name__)
@@ -33,6 +34,7 @@ JWT_ALGORITHM = 'HS256'
 
 private_key = RSA.generate(2048)
 public_key = private_key.publickey()
+
 
 class AuthenticatedModelView(ModelView):
     def is_accessible(self):
@@ -58,9 +60,20 @@ class User(db.Model, UserMixin):
     def __repr__(self):
         return f'<User {self.username}>'
     
+def unique_username(form, field):
+    if User.query.filter_by(username=field.data).first():
+        raise ValidationError('Username already exists. Please choose a different one.')
+    
 class UserAdmin(AdminOnlyModelView):
     column_list = ['username', 'password', 'is_admin']
     form_columns = ['username', 'password', 'is_admin']
+    form_overrides = {'is_admin': BooleanField}
+    form_args = {
+        'username': {
+            'validators': [unique_username]
+        }
+    }
+
 
 @login_manager.user_loader
 def load_user(user_id):
