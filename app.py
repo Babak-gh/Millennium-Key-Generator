@@ -106,15 +106,15 @@ class Version(db.Model):
     apk_url = db.Column(db.String(255), nullable=False)
     variant = db.Column(db.Text, nullable=True)
 
-#class VersionAdmin(ModelView):
- #   column_list = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
- #   form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
+class VersionAdmin(AdminOnlyModelView):
+    column_list = ['version_code', 'release_date' , 'apk_url' , 'variant']
+    form_columns = ['version_code', 'release_date' , 'apk_url' , 'variant']
 
 
 admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
-admin.add_view(AdminOnlyModelView(Version, db.session))
+admin.add_view(VersionAdmin(Version, db.session))
 
 with app.app_context():
      db.create_all()
