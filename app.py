@@ -67,7 +67,7 @@ class Issuer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     issuer = db.Column(db.String(120), nullable=False, unique=True)
     allowed_licenses = db.Column(db.Integer, default = 0)
-    created_by = db.Column(db.String(150), nullable=False)
+    created_by = db.Column(db.String(150), nullable=True)
 
 class IssuerAdmin(AuthenticatedModelView):
     column_list = ['id', 'issuer', 'allowed_licenses', 'created_by']
@@ -90,9 +90,9 @@ class License(db.Model):
     created_date = db.Column(db.DateTime, nullable=False)
     license = db.Column(db.String(500), nullable=False)
 
-class LicenseAdmin(ModelView):
-    column_list = ['code', 'issuer', 'owner', 'project', 'is_active', 'license', 'created_date']
-    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'license', 'created_date']
+class LicenseAdmin(AdminOnlyModelView):
+    column_list = ['code', 'issuer', 'owner', 'project', 'is_active','created_date', 'license']
+    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active','created_date', 'license']
 
 
     
@@ -109,7 +109,7 @@ class VersionAdmin(ModelView):
     form_columns = ['id', 'version_code', 'release_date' , 'apk_url' , 'variant']
 
 
-admin.add_view(AdminOnlyModelView(License, db.session))
+admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(AdminOnlyModelView(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(AdminOnlyModelView(Version, db.session))
