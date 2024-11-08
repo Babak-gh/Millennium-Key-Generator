@@ -13,7 +13,7 @@ import csv
 import datetime
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
-from wtforms import BooleanField, ValidationError
+from nbformat import ValidationError
 
 
 app = Flask(__name__)
@@ -67,12 +67,6 @@ def unique_username(form, field):
 class UserAdmin(AdminOnlyModelView):
     column_list = ['username', 'password', 'is_admin']
     form_columns = ['username', 'password', 'is_admin']
-    #form_overrides = {'is_admin': BooleanField}
-    #form_args = {
-    #    'username': {
-    #        'validators': [unique_username]
-    #    }
-    #}
 
 
 @login_manager.user_loader
@@ -124,22 +118,10 @@ class VersionAdmin(AdminOnlyModelView):
     form_columns = ['version_code', 'release_date' , 'apk_url' , 'variant']
 
 
-class Babak(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    version_code = db.Column(db.Integer, nullable=False)
-    release_date = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now(datetime.timezone.utc))
-    apk_url = db.Column(db.String(255), nullable=False)
-    variant = db.Column(db.Text, nullable=True)
-
-class BabakAdmin(AdminOnlyModelView):
-    column_list = ['version_code', 'release_date' , 'apk_url' , 'variant']
-    form_columns = ['version_code', 'release_date' , 'apk_url' , 'variant']
-
 admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(VersionAdmin(Version, db.session))
-admin.add_view(BabakAdmin(Babak, db.session))
 
 with app.app_context():
      db.create_all()
