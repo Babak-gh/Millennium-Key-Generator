@@ -313,7 +313,6 @@ def check_code_in_csv(code):
 
 @app.route('/admin/license/export_excel')
 @login_required
-@token_required  # Optional: remove if you want only Flask-Login control
 def export_licenses_to_excel():
     # Query all licenses and join with issuer to get created_by
     results = db.session.query(
