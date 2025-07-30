@@ -14,6 +14,9 @@ import datetime
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
 from nbformat import ValidationError
+import pandas as pd
+import io
+from flask import send_file
 
 
 app = Flask(__name__)
@@ -102,8 +105,16 @@ class License(db.Model):
     license = db.Column(db.String(500), nullable=False)
 
 class LicenseAdmin(AdminOnlyModelView):
-    column_list = ['code', 'issuer', 'owner', 'project', 'is_active','created_date', 'license']
-    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active','created_date', 'license']
+    column_list = ['code', 'issuer', 'owner', 'project', 'is_active', 'created_date', 'license']
+    form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'created_date', 'license']
+    can_export = True
+    # Use custom template
+    list_template = 'admin/license_list.html'
+
+    def render(self, template, **kwargs):
+        if template == self.list_template:
+            kwargs['export_url'] = url_for('export_licenses_to_excel')
+        return super(LicenseAdmin, self).render(template, **kwargs)
 
 
 class Version(db.Model):
@@ -298,6 +309,57 @@ def check_code_in_csv(code):
                     return True  # Code found
 
     return False  # Code not found
+
+
+@app.route('/admin/license/export_excel')
+@login_required
+@token_required  # Optional: remove if you want only Flask-Login control
+def export_licenses_to_excel():
+    # Query all licenses and join with issuer to get created_by
+    results = db.session.query(
+        License.code,
+        License.issuer,
+        License.owner,
+        License.project,
+        License.is_active,
+        License.created_date,
+        License.license,
+        Issuer.created_by.label('issuer_created_by')
+    ).join(Issuer, License.issuer == Issuer.issuer).all()
+
+    # Convert to list of dicts for pandas
+    data = []
+    for row in results:
+        data.append({
+            'License Code': row.code,
+            'Issuer': row.issuer,
+            'Owner': row.owner,
+            'Project': row.project,
+            'Is Active': 'Yes' if row.is_active else 'No',
+            'Created Date': row.created_date.strftime('%Y-%m-%d %H:%M:%S') if row.created_date else '',
+            'License Data': row.license,
+            'Issuer Created By': row.issuer_created_by
+        })
+
+    # Create DataFrame
+    df = pd.DataFrame(data)
+
+    # Write to Excel in memory
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Licenses')
+
+    output.seek(0)
+
+    # Return as downloadable file
+    now = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"licenses_export_{now}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 
 ### Update Android APIs ###
