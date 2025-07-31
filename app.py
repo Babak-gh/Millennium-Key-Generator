@@ -314,7 +314,7 @@ def check_code_in_csv(code):
 @app.route('/admin/license/export_excel')
 @login_required
 def export_licenses_to_excel():
-    # Query all licenses and join with issuer to get created_by
+    # Query all licenses and outerjoin with issuer to get created_by
     results = db.session.query(
         License.code,
         License.issuer,
@@ -324,7 +324,7 @@ def export_licenses_to_excel():
         License.created_date,
         License.license,
         Issuer.created_by.label('issuer_created_by')
-    ).join(Issuer, License.issuer == Issuer.issuer).all()
+    ).outerjoin(Issuer, License.issuer == Issuer.issuer).all()
 
     # Convert to list of dicts for pandas
     data = []
@@ -337,7 +337,7 @@ def export_licenses_to_excel():
             'Is Active': 'Yes' if row.is_active else 'No',
             'Created Date': row.created_date.strftime('%Y-%m-%d %H:%M:%S') if row.created_date else '',
             'License Data': row.license,
-            'Issuer Created By': row.issuer_created_by
+            'Issuer Created By': row.issuer_created_by or 'None'
         })
 
     # Create DataFrame
