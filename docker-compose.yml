@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   flask_app:
+    restart: always
     image: ${DOCKER_USERNAME}/millennium:latest
     build:
       context: .
