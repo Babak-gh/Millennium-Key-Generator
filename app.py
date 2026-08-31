@@ -33,7 +33,7 @@ login_manager.login_view = 'login'
 admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default_jwt_secret')
-JWT_ALGORITHM = 'HS256' 
+JWT_ALGORITHM = 'HS256'
 
 private_key = RSA.generate(2048)
 public_key = private_key.publickey()
@@ -45,8 +45,8 @@ class AuthenticatedModelView(ModelView):
 
     def inaccessible_callback(self, name, **kwargs):
         return redirect(url_for('login', next=request.url))
-    
-    
+
+
 class AdminOnlyModelView(ModelView):
     def is_accessible(self):
         return current_user.is_authenticated and current_user.is_admin
@@ -62,11 +62,11 @@ class User(db.Model, UserMixin):
 
     def __repr__(self):
         return f'<User {self.username}>'
-    
+
 def unique_username(form, field):
     if User.query.filter_by(username=field.data).first():
         raise ValidationError('Username already exists. Please choose a different one.')
-    
+
 class UserAdmin(AdminOnlyModelView):
     column_list = ['username', 'password', 'is_admin']
     form_columns = ['username', 'password', 'is_admin']
@@ -80,13 +80,13 @@ class Issuer(db.Model):
     __tablename__ = 'issuer'
     id = db.Column(db.Integer, primary_key=True)
     issuer = db.Column(db.String(120), nullable=False, unique=True)
-    allowed_licenses = db.Column(db.Integer, default = 0)
+    allowed_licenses = db.Column(db.Integer, default=0)
     created_by = db.Column(db.String(150), nullable=True)
 
 class IssuerAdmin(AuthenticatedModelView):
     column_list = ['issuer', 'allowed_licenses', 'created_by']
     form_columns = ['issuer', 'allowed_licenses']
-    
+
     def on_model_change(self, form, model, is_created):
         if is_created:
             model.created_by = current_user.username
@@ -125,8 +125,8 @@ class Version(db.Model):
     variant = db.Column(db.Text, nullable=True)
 
 class VersionAdmin(AdminOnlyModelView):
-    column_list = ['version_code', 'release_date' , 'apk_url' , 'variant']
-    form_columns = ['version_code', 'release_date' , 'apk_url' , 'variant']
+    column_list = ['version_code', 'release_date', 'apk_url', 'variant']
+    form_columns = ['version_code', 'release_date', 'apk_url', 'variant']
 
 
 admin.add_view(LicenseAdmin(License, db.session))
@@ -135,10 +135,10 @@ admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(VersionAdmin(Version, db.session))
 
 with app.app_context():
-     db.create_all()
+    db.create_all()
 
-     if not User.query.first():
-        hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS' , 'default_pass')).decode('utf-8')
+    if not User.query.first():
+        hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS', 'default_pass')).decode('utf-8')
         new_user = User(username='admin', password=hashed_password, is_admin=True) 
         db.session.add(new_user)
         db.session.commit()
@@ -147,7 +147,7 @@ def create_jwt_token(code):
     payload = {
         'device_id': code,
         'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=60)
-        }
+    }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return token
 
@@ -155,9 +155,9 @@ def create_refresh_token(code):
     payload = {
         'device_id': code,
         'exp': datetime.datetime.utcnow() + datetime.timedelta(days=20)
-        }
+    }
     refresh_token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    return refresh_token   
+    return refresh_token
 
 
 def token_required(f):
@@ -204,9 +204,10 @@ def register_device():
     jwt_token = create_jwt_token(code)
     refresh_token = create_refresh_token(code)
 
-    return jsonify({'jwt_token': jwt_token,
-                    'refresh_token': refresh_token
-                    })
+    return jsonify({
+        'jwt_token': jwt_token,
+        'refresh_token': refresh_token
+    })
 
 @app.route('/refresh-token', methods=['POST'])
 def refresh_jwt_token():
@@ -227,10 +228,10 @@ def refresh_jwt_token():
 def get_public_key():
     public_key_pem = public_key.export_key(format='PEM')
     public_key_base64 = base64.b64encode(public_key_pem).decode('utf-8')
-    return jsonify({'public_key':public_key_base64})
+    return jsonify({'public_key': public_key_base64})
 
 
-@app.route('/is_active',methods=['POST'])
+@app.route('/is_active', methods=['POST'])
 @token_required
 def is_active():
     data = request.json
@@ -238,11 +239,11 @@ def is_active():
     license_record = License.query.filter_by(code=code).first()
     if not license_record:
         return jsonify({'result': False})
-    if  license_record.is_active:
+    if license_record.is_active:
         return jsonify({'result': True})
     else:
         return jsonify({'result': False})
-    
+
 def sign_device_id(device_id: str) -> str:
     h = SHA256.new(device_id.encode('utf_8'))
     signature = PKCS1_v1_5.new(private_key).sign(h)
@@ -263,15 +264,15 @@ def register_activate_request():
     existing_license = License.query.filter_by(code=code).first()
 
     encrypted_text = None
-        
+
     if (not existing_license) or (not existing_license.is_active) or is_manual_license:
         issuer = data.get('issuer')
         existing_issuer = Issuer.query.filter_by(issuer=issuer).first()
         if not existing_issuer:
-            return jsonify({'error':'You are not allowed to get a license'}), 403
+            return jsonify({'error': 'You are not allowed to get a license'}), 403
         if existing_issuer.allowed_licenses == 0:
-            return jsonify({'error':'You do not have enough licenses'}), 403
-        
+            return jsonify({'error': 'You do not have enough licenses'}), 403
+
         owner = data.get('owner')
         project = data.get('project')
         license_data = f"{code}"
@@ -286,29 +287,27 @@ def register_activate_request():
             new_license = License(
                 code=code, issuer=issuer, owner=owner, project=project,
                 is_active=True, license=encrypted_text, created_date=datetime.datetime.now(datetime.timezone.utc)
-                )
+            )
             db.session.add(new_license)
         existing_issuer.allowed_licenses -= 1
         db.session.commit()
     else:
-        return jsonify({'error':'Already activated'}), 403
-    
+        return jsonify({'error': 'Already activated'}), 403
+
     app.logger.error(encrypted_text)
-    return  jsonify({'encrypted_license': encrypted_text})
+    return jsonify({'encrypted_license': encrypted_text})
 
 def check_code_in_csv(code):
-    file_path = '/app/past.csv'  # Path to your CSV file in the Docker container
+    file_path = '/app/past.csv'
     with open(file_path, 'r') as csvfile:
         reader = csv.reader(csvfile)
-        
-        # Loop through each row in the CSV
         for row in reader:
-            if row:  # Make sure the row is not empty
-                csv_code = row[0][:9]  # Assuming code is in the first column and taking first 8 characters
+            if row:
+                csv_code = row[0][:9]
                 if code == csv_code:
-                    return True  # Code found
+                    return True
 
-    return False  # Code not found
+    return False
 
 
 @app.route('/admin/license/export_excel')
@@ -368,7 +367,7 @@ def check_update():
     variant = request.json.get('variant')
     version_code = request.json.get('version_code')
 
-    latest_version = Version.query.filter_by(variant = variant).order_by(Version.id.desc()).first()
+    latest_version = Version.query.filter_by(variant=variant).order_by(Version.id.desc()).first()
     if not latest_version:
         return jsonify({'error': 'No version available'}), 404
 
@@ -383,11 +382,47 @@ def check_update():
 @app.route('/download_apk', methods=['GET'])
 def download_apk():
     variant = request.args.get('variant')
-    latest_version = Version.query.filter_by(variant = variant).order_by(Version.id.desc()).first()
+    latest_version = Version.query.filter_by(variant=variant).order_by(Version.id.desc()).first()
     if latest_version:
         return redirect(latest_version.apk_url)
     return jsonify({'error': 'No APK available'}), 404
 
+@app.route('/webhook/github/release', methods=['POST'])
+def github_release_webhook():
+    # 1. Security Check: Ensure only our GitHub Actions can trigger this
+    webhook_secret = request.headers.get('X-Webhook-Secret')
+    expected_secret = os.environ.get('WEBHOOK_SECRET', 'my_super_secret_webhook_password_123')
+
+    if not webhook_secret or webhook_secret != expected_secret:
+        app.logger.warning("Unauthorized webhook attempt.")
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    # 2. Parse the payload from GitHub
+    data = request.json
+    version_code = data.get('version_code')
+    releases = data.get('releases') # Expected format: {"basic": "url", "pro": "url", "pro7": "url"}
+
+    if not version_code or not releases:
+        return jsonify({'error': 'Invalid payload data'}), 400
+
+    # 3. Update the Database Safely
+    try:
+        for variant, apk_url in releases.items():
+            new_version = Version(
+                version_code=int(version_code),
+                apk_url=apk_url,
+                variant=variant
+            )
+            db.session.add(new_version)
+
+        db.session.commit()
+        app.logger.info(f"Successfully added Version Code {version_code} for variants: {list(releases.keys())}")
+        return jsonify({'message': 'Database updated successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback() # Abort the transaction if anything fails
+        app.logger.error(f"Database error during webhook: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 if __name__ == '__main__':
