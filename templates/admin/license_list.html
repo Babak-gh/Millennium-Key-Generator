@@ -1,0 +1,10 @@
+{% extends 'admin/model/list.html' %}
+
+{% block body %}
+    <div style="margin-bottom: 10px;">
+        <a href="{{ export_url }}" class="btn btn-success btn-sm">
+            <span class="glyphicon glyphicon-export"></span> Export to Excel
+        </a>
+    </div>
+    {{ super() }}
+{% endblock %}
