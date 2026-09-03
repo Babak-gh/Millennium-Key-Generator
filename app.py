@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, render_template, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
-from flask_admin import Admin
+from flask_admin import Admin, AdminIndexView, expose
 from flask_admin.contrib.sqla import ModelView
 from sqlalchemy import inspect, text
 from Crypto.PublicKey import RSA
@@ -42,7 +42,25 @@ bcrypt = Bcrypt(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-admin = Admin(app, name='Database Admin', template_mode='bootstrap3')
+
+class DashboardAdminIndexView(AdminIndexView):
+    def is_accessible(self):
+        return current_user.is_authenticated
+
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('login', next=request.url))
+
+    @expose('/')
+    def index(self):
+        return self.render('admin/dashboard.html', **build_dashboard_context())
+
+
+admin = Admin(
+    app,
+    name='Millennium Licensing',
+    template_mode='bootstrap3',
+    index_view=DashboardAdminIndexView()
+)
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default_jwt_secret')
 JWT_ALGORITHM = 'HS256'
@@ -95,16 +113,23 @@ class Issuer(db.Model):
     allowed_licenses = db.Column(db.Integer, default=0)
     allowed_zigbee_licenses = db.Column(db.Integer, nullable=False, default=0)
     created_by = db.Column(db.String(150), nullable=True)
+    created_date = db.Column(
+        db.DateTime,
+        nullable=True,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc)
+    )
 
 class IssuerAdmin(AuthenticatedModelView):
     column_list = [
-        'issuer', 'allowed_licenses', 'allowed_zigbee_licenses', 'created_by'
+        'issuer', 'allowed_licenses', 'allowed_zigbee_licenses', 'created_by',
+        'created_date'
     ]
     form_columns = ['issuer', 'allowed_licenses', 'allowed_zigbee_licenses']
 
     def on_model_change(self, form, model, is_created):
         if is_created:
             model.created_by = current_user.username
+            model.created_date = datetime.datetime.now(datetime.timezone.utc)
         super(IssuerAdmin, self).on_model_change(form, model, is_created)
 
 
@@ -169,6 +194,134 @@ class VersionAdmin(AdminOnlyModelView):
     form_columns = ['version_code', 'release_date', 'apk_url', 'variant']
 
 
+def _as_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc)
+
+
+def _month_start(value):
+    return datetime.datetime(value.year, value.month, 1, tzinfo=datetime.timezone.utc)
+
+
+def _shift_month(value, offset):
+    month_index = value.year * 12 + value.month - 1 + offset
+    return datetime.datetime(
+        month_index // 12,
+        month_index % 12 + 1,
+        1,
+        tzinfo=datetime.timezone.utc
+    )
+
+
+def build_monthly_chart(values, unknown_label=None, month_count=12):
+    current_month = _month_start(datetime.datetime.now(datetime.timezone.utc))
+    months = [_shift_month(current_month, offset) for offset in range(1 - month_count, 1)]
+    counts = {month: 0 for month in months}
+    earlier_count = 0
+    unknown_count = 0
+
+    for raw_value in values:
+        value = _as_utc(raw_value)
+        if value is None:
+            unknown_count += 1
+            continue
+        value_month = _month_start(value)
+        if value_month < months[0]:
+            earlier_count += 1
+        elif value_month in counts:
+            counts[value_month] += 1
+
+    points = []
+    if earlier_count:
+        points.append({'label': 'Earlier', 'count': earlier_count})
+    if unknown_label and unknown_count:
+        points.append({'label': unknown_label, 'count': unknown_count})
+    points.extend({
+        'label': month.strftime('%b %y'),
+        'count': counts[month]
+    } for month in months)
+
+    maximum = max((point['count'] for point in points), default=0) or 1
+    for point in points:
+        point['height'] = max(5, round(point['count'] * 100 / maximum)) \
+            if point['count'] else 0
+    return points
+
+
+def build_dashboard_context():
+    base_records = License.query.order_by(License.created_date.desc()).all()
+    zigbee_records = ZigbeeLicense.query.order_by(ZigbeeLicense.created_date.desc()).all()
+    issuer_records = Issuer.query.order_by(Issuer.issuer.asc()).all()
+
+    active_base_codes = {record.code for record in base_records if record.is_active}
+    active_zigbee_codes = {record.code for record in zigbee_records if record.is_active}
+    full_codes = active_base_codes & active_zigbee_codes
+
+    recent_activity = []
+    for record in base_records[:8]:
+        recent_activity.append({
+            'kind': 'Base',
+            'code': record.code,
+            'issuer': record.issuer,
+            'owner': record.owner,
+            'created_date': _as_utc(record.created_date),
+            'active': record.is_active
+        })
+    for record in zigbee_records[:8]:
+        recent_activity.append({
+            'kind': 'Zigbee',
+            'code': record.code,
+            'issuer': record.issuer,
+            'owner': record.owner,
+            'created_date': _as_utc(record.created_date),
+            'active': record.is_active
+        })
+    recent_activity.sort(
+        key=lambda item: item['created_date'] or datetime.datetime.min.replace(
+            tzinfo=datetime.timezone.utc
+        ),
+        reverse=True
+    )
+
+    quota_rows = [{
+        'issuer': record.issuer,
+        'base': max(record.allowed_licenses or 0, 0),
+        'zigbee': max(record.allowed_zigbee_licenses or 0, 0)
+    } for record in issuer_records]
+    quota_rows.sort(key=lambda row: (row['base'] + row['zigbee'], row['issuer'].lower()))
+
+    return {
+        'base_chart': build_monthly_chart(
+            [record.created_date for record in base_records]
+        ),
+        'zigbee_chart': build_monthly_chart(
+            [record.created_date for record in zigbee_records]
+        ),
+        'issuer_chart': build_monthly_chart(
+            [record.created_date for record in issuer_records],
+            unknown_label='Legacy'
+        ),
+        'base_total': len(base_records),
+        'base_active': len(active_base_codes),
+        'zigbee_total': len(zigbee_records),
+        'zigbee_active': len(active_zigbee_codes),
+        'issuer_total': len(issuer_records),
+        'full_total': len(full_codes),
+        'base_only_total': len(active_base_codes - full_codes),
+        'base_quota_remaining': sum(row['base'] for row in quota_rows),
+        'zigbee_quota_remaining': sum(row['zigbee'] for row in quota_rows),
+        'legacy_issuer_count': sum(
+            1 for record in issuer_records if record.created_date is None
+        ),
+        'recent_activity': recent_activity[:10],
+        'quota_rows': quota_rows[:10],
+        'generated_at': datetime.datetime.now(datetime.timezone.utc)
+    }
+
+
 admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(ZigbeeLicenseAdmin(ZigbeeLicense, db.session, name='Zigbee Licenses'))
 admin.add_view(UserAdmin(User, db.session))
@@ -183,6 +336,11 @@ def migrate_schema():
             connection.execute(text(
                 'ALTER TABLE issuer ADD COLUMN '
                 'allowed_zigbee_licenses INTEGER NOT NULL DEFAULT 0'
+            ))
+    if 'created_date' not in issuer_columns:
+        with db.engine.begin() as connection:
+            connection.execute(text(
+                'ALTER TABLE issuer ADD COLUMN created_date DATETIME'
             ))
 
 
@@ -199,8 +357,22 @@ def backup_database_before_zigbee_migration():
     os.chmod(backup_path, 0o600)
 
 
+def backup_database_before_dashboard_migration():
+    """Keep a snapshot before adding issuer creation timestamps."""
+    database_path = db.engine.url.database
+    if not database_path or not os.path.isfile(database_path):
+        return
+    backup_path = f'{database_path}.pre_dashboard_migration.bak'
+    if os.path.exists(backup_path):
+        return
+    with sqlite3.connect(database_path) as source, sqlite3.connect(backup_path) as destination:
+        source.backup(destination)
+    os.chmod(backup_path, 0o600)
+
+
 with app.app_context():
     backup_database_before_zigbee_migration()
+    backup_database_before_dashboard_migration()
     db.create_all()
     migrate_schema()
 
