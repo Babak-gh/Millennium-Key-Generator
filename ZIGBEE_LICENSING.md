@@ -92,7 +92,7 @@ Debug builds retain the project's existing `SKIP_LICENSE_CHECK` developer behavi
 
 ## Administrative workflow
 
-1. As an administrator, open the **Zigbee Quotas** screen and assign the purchased Zigbee quota. Ordinary issuer accounts cannot alter this quota.
+1. Create or edit the issuer and enter its Base quota and Zigbee quota together on the **Issuer** screen.
 2. Ensure the panel already has an active Base license.
 3. On the panel, open Settings > General and select **Request Zigbee feature**.
 4. The app reads the coordinator EUI-64, requests the entitlement, verifies it, and stores it.

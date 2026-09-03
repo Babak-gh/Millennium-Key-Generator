@@ -97,10 +97,10 @@ class Issuer(db.Model):
     created_by = db.Column(db.String(150), nullable=True)
 
 class IssuerAdmin(AuthenticatedModelView):
-    # Preserve the existing Base-license issuer workflow unchanged. Zigbee quota
-    # is managed in its own admin-only view below.
-    column_list = ['issuer', 'allowed_licenses', 'created_by']
-    form_columns = ['issuer', 'allowed_licenses']
+    column_list = [
+        'issuer', 'allowed_licenses', 'allowed_zigbee_licenses', 'created_by'
+    ]
+    form_columns = ['issuer', 'allowed_licenses', 'allowed_zigbee_licenses']
 
     def on_model_change(self, form, model, is_created):
         if is_created:
@@ -157,13 +157,6 @@ class ZigbeeLicenseAdmin(AdminOnlyModelView):
     can_delete = False
 
 
-class ZigbeeQuotaAdmin(AdminOnlyModelView):
-    column_list = ['issuer', 'allowed_zigbee_licenses', 'created_by']
-    form_columns = ['allowed_zigbee_licenses']
-    can_create = False
-    can_delete = False
-
-
 class Version(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     version_code = db.Column(db.Integer, nullable=False)
@@ -178,9 +171,6 @@ class VersionAdmin(AdminOnlyModelView):
 
 admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(ZigbeeLicenseAdmin(ZigbeeLicense, db.session, name='Zigbee Licenses'))
-admin.add_view(ZigbeeQuotaAdmin(
-    Issuer, db.session, name='Zigbee Quotas', endpoint='zigbee-quotas'
-))
 admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(VersionAdmin(Version, db.session))
