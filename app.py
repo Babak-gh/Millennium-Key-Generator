@@ -2,15 +2,22 @@ from flask import Flask, jsonify, request, render_template, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
+from sqlalchemy import inspect, text
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from Crypto.Signature import PKCS1_v1_5
 import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
 import jwt
 import csv
 import datetime
+import fcntl
+import sqlite3
+import uuid
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
 from nbformat import ValidationError
@@ -21,8 +28,13 @@ from flask import send_file
 
 app = Flask(__name__)
 
+BASE_DATABASE_PATH = os.path.join(app.instance_path, 'my_database.db')
+ZIGBEE_DATABASE_PATH = os.path.join(app.instance_path, 'zigbee_licenses.db')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_secret_key')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(app.instance_path, 'my_database.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + BASE_DATABASE_PATH
+app.config['SQLALCHEMY_BINDS'] = {
+    'zigbee': 'sqlite:///' + ZIGBEE_DATABASE_PATH
+}
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
@@ -81,9 +93,12 @@ class Issuer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     issuer = db.Column(db.String(120), nullable=False, unique=True)
     allowed_licenses = db.Column(db.Integer, default=0)
+    allowed_zigbee_licenses = db.Column(db.Integer, nullable=False, default=0)
     created_by = db.Column(db.String(150), nullable=True)
 
 class IssuerAdmin(AuthenticatedModelView):
+    # Preserve the existing Base-license issuer workflow unchanged. Zigbee quota
+    # is managed in its own admin-only view below.
     column_list = ['issuer', 'allowed_licenses', 'created_by']
     form_columns = ['issuer', 'allowed_licenses']
 
@@ -117,6 +132,38 @@ class LicenseAdmin(AdminOnlyModelView):
         return super(LicenseAdmin, self).render(template, **kwargs)
 
 
+class ZigbeeLicense(db.Model):
+    __bind_key__ = 'zigbee'
+    __tablename__ = 'zigbee_licenses'
+    id = db.Column(db.Integer, primary_key=True)
+    license_id = db.Column(db.String(36), nullable=False, unique=True)
+    code = db.Column(db.String(80), nullable=False, unique=True)
+    coordinator_eui64 = db.Column(db.String(16), nullable=False, unique=True)
+    issuer = db.Column(db.String(120), nullable=False)
+    owner = db.Column(db.String(120), nullable=False)
+    project = db.Column(db.String(120), nullable=False)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_date = db.Column(db.DateTime, nullable=False)
+    license = db.Column(db.Text, nullable=False)
+
+
+class ZigbeeLicenseAdmin(AdminOnlyModelView):
+    column_list = [
+        'license_id', 'code', 'coordinator_eui64', 'issuer', 'owner',
+        'project', 'is_active', 'created_date', 'license'
+    ]
+    form_columns = ['is_active']
+    can_create = False
+    can_delete = False
+
+
+class ZigbeeQuotaAdmin(AdminOnlyModelView):
+    column_list = ['issuer', 'allowed_zigbee_licenses', 'created_by']
+    form_columns = ['allowed_zigbee_licenses']
+    can_create = False
+    can_delete = False
+
+
 class Version(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     version_code = db.Column(db.Integer, nullable=False)
@@ -130,12 +177,42 @@ class VersionAdmin(AdminOnlyModelView):
 
 
 admin.add_view(LicenseAdmin(License, db.session))
+admin.add_view(ZigbeeLicenseAdmin(ZigbeeLicense, db.session, name='Zigbee Licenses'))
+admin.add_view(ZigbeeQuotaAdmin(
+    Issuer, db.session, name='Zigbee Quotas', endpoint='zigbee-quotas'
+))
 admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(VersionAdmin(Version, db.session))
 
+def migrate_schema():
+    """Apply additive schema changes without replacing the existing SQLite data."""
+    issuer_columns = {column['name'] for column in inspect(db.engine).get_columns('issuer')}
+    if 'allowed_zigbee_licenses' not in issuer_columns:
+        with db.engine.begin() as connection:
+            connection.execute(text(
+                'ALTER TABLE issuer ADD COLUMN '
+                'allowed_zigbee_licenses INTEGER NOT NULL DEFAULT 0'
+            ))
+
+
+def backup_database_before_zigbee_migration():
+    """Keep one consistent copy of the pre-Zigbee SQLite database."""
+    database_path = db.engine.url.database
+    if not database_path or not os.path.isfile(database_path):
+        return
+    backup_path = f'{database_path}.pre_zigbee_migration.bak'
+    if os.path.exists(backup_path):
+        return
+    with sqlite3.connect(database_path) as source, sqlite3.connect(backup_path) as destination:
+        source.backup(destination)
+    os.chmod(backup_path, 0o600)
+
+
 with app.app_context():
+    backup_database_before_zigbee_migration()
     db.create_all()
+    migrate_schema()
 
     if not User.query.first():
         hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS', 'default_pass')).decode('utf-8')
@@ -144,17 +221,23 @@ with app.app_context():
         db.session.commit()
 
 def create_jwt_token(code):
+    now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         'device_id': code,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=60)
+        'token_type': 'access',
+        'iat': now,
+        'exp': now + datetime.timedelta(minutes=60)
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return token
 
 def create_refresh_token(code):
+    now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         'device_id': code,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=20)
+        'token_type': 'refresh',
+        'iat': now,
+        'exp': now + datetime.timedelta(days=20)
     }
     refresh_token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return refresh_token
@@ -214,6 +297,11 @@ def refresh_jwt_token():
     refresh_token = request.json.get('refresh_token')
     try:
         decoded = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # Tokens issued before token types were introduced did not contain this
+        # claim. Accept those until their existing 20-day lifetime ends, while
+        # preventing newly issued access tokens from being used as refresh tokens.
+        if decoded.get('token_type') not in (None, 'refresh'):
+            return jsonify({'error': 'Invalid refresh token'}), 401
         device_id = decoded['device_id']
         new_jwt_token = create_jwt_token(device_id)
         return jsonify({'jwt_token': new_jwt_token}), 200
@@ -308,6 +396,253 @@ def check_code_in_csv(code):
                     return True
 
     return False
+
+
+_zigbee_signing_key = None
+
+
+def _base64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+
+
+def get_zigbee_signing_key():
+    """Load the dedicated persistent Zigbee signing key, creating it once if needed."""
+    global _zigbee_signing_key
+    if _zigbee_signing_key is not None:
+        return _zigbee_signing_key
+
+    configured_path = os.environ.get('ZIGBEE_LICENSE_PRIVATE_KEY_PATH')
+    key_path = os.path.abspath(
+        configured_path or os.path.join(app.instance_path, 'zigbee_license_private.pem')
+    )
+    os.makedirs(os.path.dirname(key_path), exist_ok=True)
+
+    # The file lock prevents two server workers from creating different keys at startup.
+    with open(f'{key_path}.lock', 'a') as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if not os.path.exists(key_path):
+            generated_key = RSA.generate(3072)
+            temporary_path = f'{key_path}.{os.getpid()}.tmp'
+            with open(temporary_path, 'wb') as key_file:
+                key_file.write(generated_key.export_key(format='PEM', passphrase=None, pkcs=8))
+            os.chmod(temporary_path, 0o600)
+            os.replace(temporary_path, key_path)
+
+        with open(key_path, 'rb') as key_file:
+            _zigbee_signing_key = RSA.import_key(key_file.read())
+
+    return _zigbee_signing_key
+
+
+def zigbee_public_key_response_fields():
+    public_der = get_zigbee_signing_key().publickey().export_key(format='DER')
+    return {
+        'zigbee_public_key': base64.b64encode(public_der).decode('ascii'),
+        'zigbee_key_id': hashlib.sha256(public_der).hexdigest()[:16]
+    }
+
+
+def create_zigbee_entitlement(license_id, code, coordinator_eui64, issued_at):
+    # SQLite returns stored datetimes without timezone information. They were
+    # written as UTC, so restore that context before reissuing an entitlement.
+    if issued_at.tzinfo is None:
+        issued_at = issued_at.replace(tzinfo=datetime.timezone.utc)
+    public_fields = zigbee_public_key_response_fields()
+    header = {
+        'alg': 'RS256',
+        'kid': public_fields['zigbee_key_id'],
+        'typ': 'JWT'
+    }
+    payload = {
+        'iss': 'millennium-license-service',
+        'sub': code,
+        'feature': 'zigbee',
+        'coordinator_eui64': coordinator_eui64,
+        'license_id': license_id,
+        'iat': int(issued_at.timestamp()),
+        'schema_version': 1
+    }
+    encoded_header = _base64url(json.dumps(
+        header, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8'))
+    encoded_payload = _base64url(json.dumps(
+        payload, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8'))
+    signed_content = f'{encoded_header}.{encoded_payload}'.encode('ascii')
+    signature = PKCS1_v1_5.new(get_zigbee_signing_key()).sign(SHA256.new(signed_content))
+    return f'{encoded_header}.{encoded_payload}.{_base64url(signature)}'
+
+
+def normalize_coordinator_eui64(value):
+    normalized = ''.join(character for character in (value or '') if character.isalnum()).upper()
+    if len(normalized) != 16 or any(character not in '0123456789ABCDEF' for character in normalized):
+        return None
+    return normalized
+
+
+def persist_zigbee_license_with_quota(
+    issuer_id,
+    license_id,
+    code,
+    coordinator_eui64,
+    issuer_name,
+    owner,
+    project,
+    created_date,
+    entitlement
+):
+    """Debit Base DB quota and insert into the Zigbee DB in one SQLite transaction."""
+    connection = sqlite3.connect(BASE_DATABASE_PATH, timeout=30)
+    try:
+        connection.execute('ATTACH DATABASE ? AS zigbee', (ZIGBEE_DATABASE_PATH,))
+        connection.execute('BEGIN IMMEDIATE')
+        quota_update = connection.execute(
+            'UPDATE issuer '
+            'SET allowed_zigbee_licenses = allowed_zigbee_licenses - 1 '
+            'WHERE id = ? AND allowed_zigbee_licenses > 0',
+            (issuer_id,)
+        )
+        if quota_update.rowcount != 1:
+            connection.rollback()
+            return 'no_quota'
+
+        connection.execute(
+            'INSERT INTO zigbee.zigbee_licenses '
+            '(license_id, code, coordinator_eui64, issuer, owner, project, '
+            'is_active, created_date, license) '
+            'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
+            (
+                license_id,
+                code,
+                coordinator_eui64,
+                issuer_name,
+                owner,
+                project,
+                created_date.astimezone(datetime.timezone.utc)
+                .replace(tzinfo=None).isoformat(sep=' '),
+                entitlement
+            )
+        )
+        connection.commit()
+        return 'created'
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return 'conflict'
+    finally:
+        connection.close()
+
+
+def decode_zigbee_device_access_token(code):
+    authorization = request.headers.get('Authorization', '').strip()
+    if authorization.lower().startswith('bearer '):
+        authorization = authorization[7:].strip()
+    if not authorization:
+        return None, ('Token is missing', 403)
+    try:
+        claims = jwt.decode(authorization, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        return None, ('Token has expired', 403)
+    except jwt.InvalidTokenError:
+        return None, ('Invalid token', 403)
+    if claims.get('token_type') != 'access':
+        return None, ('An access token is required', 403)
+    if not hmac.compare_digest(str(claims.get('device_id', '')), code):
+        return None, ('Token does not belong to this device', 403)
+    return claims, None
+
+
+def zigbee_activation_response(zigbee_license, already_licensed):
+    response = {
+        'zigbee_license': zigbee_license.license,
+        'coordinator_eui64': zigbee_license.coordinator_eui64,
+        'already_licensed': already_licensed
+    }
+    response.update(zigbee_public_key_response_fields())
+    return jsonify(response)
+
+
+@app.route('/zigbee/activate', methods=['POST'])
+def activate_zigbee_feature():
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code') or '').strip()
+    coordinator_eui64 = normalize_coordinator_eui64(data.get('coordinator_eui64'))
+    base_license_proof = str(data.get('base_license') or '')
+
+    if not code or len(code) > 80:
+        return jsonify({'error': 'Invalid device ID'}), 400
+    if coordinator_eui64 is None:
+        return jsonify({'error': 'Invalid Zigbee coordinator EUI-64'}), 400
+
+    _, token_error = decode_zigbee_device_access_token(code)
+    if token_error:
+        message, status = token_error
+        return jsonify({'error': message}), status
+
+    base_license = License.query.filter_by(code=code, is_active=True).first()
+    if base_license is None:
+        return jsonify({'error': 'An active Millennium Base license is required'}), 403
+    if not base_license_proof or not hmac.compare_digest(base_license.license, base_license_proof):
+        return jsonify({'error': 'Base license proof is invalid'}), 403
+
+    existing = ZigbeeLicense.query.filter_by(code=code).first()
+    if existing is not None:
+        if not existing.is_active:
+            return jsonify({'error': 'The Zigbee license has been disabled'}), 403
+        if not hmac.compare_digest(existing.coordinator_eui64, coordinator_eui64):
+            return jsonify({
+                'error': 'This device is licensed to a different Zigbee coordinator'
+            }), 409
+
+        # Reissue using the current persistent signing key. This makes reinstall
+        # recovery idempotent and does not consume another quota unit.
+        existing.license = create_zigbee_entitlement(
+            existing.license_id,
+            existing.code,
+            existing.coordinator_eui64,
+            existing.created_date
+        )
+        db.session.commit()
+        return zigbee_activation_response(existing, already_licensed=True)
+
+    issuer = Issuer.query.filter_by(issuer=base_license.issuer).first()
+    if issuer is None:
+        return jsonify({'error': 'The Base license issuer no longer exists'}), 403
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    license_id = str(uuid.uuid4())
+    entitlement = create_zigbee_entitlement(license_id, code, coordinator_eui64, now)
+    issuer_id = issuer.id
+    issuer_name = base_license.issuer
+    owner = base_license.owner
+    project = base_license.project
+
+    # End the ORM read transactions before opening the cross-database write.
+    db.session.rollback()
+    persistence_result = persist_zigbee_license_with_quota(
+        issuer_id=issuer_id,
+        license_id=license_id,
+        code=code,
+        coordinator_eui64=coordinator_eui64,
+        issuer_name=issuer_name,
+        owner=owner,
+        project=project,
+        created_date=now,
+        entitlement=entitlement
+    )
+    if persistence_result == 'no_quota':
+        return jsonify({'error': 'No Zigbee licenses are available for this issuer'}), 403
+    if persistence_result == 'conflict':
+        # A concurrent duplicate request should get the already-issued license
+        # rather than consume a second quota unit.
+        existing = ZigbeeLicense.query.filter_by(code=code).first()
+        if existing is not None and existing.is_active and hmac.compare_digest(
+            existing.coordinator_eui64, coordinator_eui64
+        ):
+            return zigbee_activation_response(existing, already_licensed=True)
+        return jsonify({'error': 'Zigbee activation conflicted with another request'}), 409
+
+    new_license = ZigbeeLicense.query.filter_by(license_id=license_id).one()
+    return zigbee_activation_response(new_license, already_licensed=False), 201
 
 
 @app.route('/admin/license/export_excel')
