@@ -1,0 +1,97 @@
+{% extends 'admin/master.html' %}
+
+{% block body %}
+<style>
+    .request-header { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; margin:12px 0 22px; }
+    .request-header h1 { margin:0 0 5px; font-size:28px; font-weight:600; color:#172033; }
+    .request-header p { color:#6b7280; margin:0; }
+    .request-filters { align-items:flex-end; display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }
+    .request-filters .form-group { margin:0; }
+    .request-panel { border:0; border-radius:10px; box-shadow:0 3px 14px rgba(22,32,51,.09); }
+    .request-panel td, .request-panel th { border-color:#edf0f4 !important; padding:10px 12px !important; vertical-align:middle !important; }
+    .request-actions { display:flex; flex-wrap:wrap; gap:6px; min-width:315px; }
+    .request-actions form { align-items:center; display:flex; gap:6px; margin:0; }
+    .request-actions select { max-width:180px; }
+    .request-id { color:#788396; font-family:monospace; font-size:11px; }
+    .status-pill { border-radius:12px; display:inline-block; font-size:11px; font-weight:600; padding:3px 8px; }
+    .status-pending { background:#fff2cc; color:#755900; }
+    .status-approved { background:#e2f6f2; color:#087b70; }
+    .status-rejected { background:#fde8e8; color:#a12622; }
+    .empty-state { color:#8791a2; padding:30px !important; text-align:center; }
+</style>
+
+<div class="request-header">
+    <div>
+        <h1>Zigbee License Requests</h1>
+        <p>Choose the billing issuer when approving an existing Base customer's Zigbee upgrade.</p>
+    </div>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+        <div class="alert {{ 'alert-success' if category == 'success' else 'alert-danger' }}">{{ message }}</div>
+    {% endfor %}
+{% endwith %}
+
+<form class="request-filters" method="get">
+    <div class="form-group">
+        <label for="request-search">Search</label>
+        <input id="request-search" class="form-control" type="search" name="q" value="{{ query_text }}" placeholder="Device, EUI, owner, project or issuer">
+    </div>
+    <div class="form-group">
+        <label for="request-status">Status</label>
+        <select id="request-status" class="form-control" name="status">
+            {% for value, label in [('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('all', 'All')] %}
+                <option value="{{ value }}" {{ 'selected' if selected_status == value else '' }}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button class="btn btn-primary" type="submit">Search</button>
+    {% if query_text or selected_status != 'pending' %}<a class="btn btn-default" href="{{ url_for('.index') }}">Reset</a>{% endif %}
+</form>
+
+<div class="panel request-panel">
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr><th>Requested</th><th>Device / Coordinator</th><th>Customer</th><th>Issuers</th><th>Status</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+            {% for item in requests %}
+                <tr>
+                    <td>{{ item.requested_date.strftime('%Y-%m-%d %H:%M') if item.requested_date else '—' }}<br><span class="request-id">{{ item.request_id }}</span></td>
+                    <td><strong>{{ item.code }}</strong><br><span class="request-id">{{ item.coordinator_eui64 }}</span></td>
+                    <td>{{ item.owner }}<br><span class="text-muted">{{ item.project }}</span></td>
+                    <td>Base: {{ item.base_issuer or 'Unknown' }}<br>Billing: {{ item.billing_issuer or 'Not assigned' }}</td>
+                    <td><span class="status-pill status-{{ item.status }}">{{ item.status|capitalize }}</span></td>
+                    <td>
+                    {% if item.status == 'pending' %}
+                        <div class="request-actions">
+                            <form method="post" action="{{ url_for('.approve', request_db_id=item.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <select class="form-control input-sm" name="issuer_id" required>
+                                    <option value="">Billing issuer…</option>
+                                    {% for issuer in issuers %}
+                                        <option value="{{ issuer.id }}">{{ issuer.issuer }} ({{ issuer.allowed_zigbee_licenses }} left)</option>
+                                    {% endfor %}
+                                </select>
+                                <button class="btn btn-success btn-sm" type="submit">Approve</button>
+                            </form>
+                            <form method="post" action="{{ url_for('.reject', request_db_id=item.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button class="btn btn-danger btn-sm" type="submit">Reject</button>
+                            </form>
+                        </div>
+                    {% else %}
+                        <span class="text-muted">Reviewed {{ item.reviewed_date.strftime('%Y-%m-%d %H:%M') if item.reviewed_date else '—' }}{% if item.reviewed_by %} by {{ item.reviewed_by }}{% endif %}</span>
+                    {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td class="empty-state" colspan="6">No Zigbee requests match these filters.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -88,16 +88,16 @@
     </div>
     <div class="col-sm-6 col-md-3">
         <div class="panel metric-card"><div class="panel-body">
-            <div class="metric-label">Full / Base-only</div>
-            <div class="metric-value">{{ full_total }} <small>/ {{ base_only_total }}</small></div>
-            <div class="metric-note">Active customer installations</div>
+            <div class="metric-label">Full / Base / Zigbee</div>
+            <div class="metric-value">{{ full_total }} <small>/ {{ base_only_total }} / {{ zigbee_only_total }}</small></div>
+            <div class="metric-note">Active product capabilities</div>
         </div></div>
     </div>
     <div class="col-sm-6 col-md-3">
         <div class="panel metric-card"><div class="panel-body">
             <div class="metric-label">Issuers</div>
             <div class="metric-value">{{ issuer_total }}</div>
-            <div class="metric-note">{{ base_quota_remaining }} Base · {{ zigbee_quota_remaining }} Zigbee quota left</div>
+            <div class="metric-note">{{ base_quota_remaining }} Base · {{ zigbee_quota_remaining }} Zigbee quota left · {{ pending_zigbee_requests }} pending</div>
         </div></div>
     </div>
 </div>

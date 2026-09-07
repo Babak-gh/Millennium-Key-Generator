@@ -1,14 +1,15 @@
 # Zigbee Feature Licensing
 
-This licensing path is independent of the existing Millennium Base activation. It adds a permanent offline Zigbee entitlement for an already Base-licensed panel and its embedded UART coordinator.
+This adds a permanent offline Zigbee entitlement alongside the existing Millennium Base license. The signed entitlement also records the purchased product capability so the Android app can distinguish Base, Full, and Zigbee-only installations.
 
 ## Commercial model
 
 - `Issuer.allowed_licenses` remains the Base-license quota.
 - `Issuer.allowed_zigbee_licenses` is the separate Zigbee-feature quota.
 - A Base-only sale consumes one Base quota.
-- A Full sale consumes one Base quota and, when Zigbee is requested, one Zigbee quota.
-- An existing Base customer can request Zigbee later if the Base license's issuer has Zigbee quota available.
+- A Full sale is one activation and atomically consumes one Base quota plus one Zigbee quota.
+- A Zigbee-only sale consumes one Zigbee quota and creates no Base license. The app is enabled, but RS485/Bus hardware access is disabled.
+- An existing Base customer can request Zigbee later. An administrator chooses which issuer owns the sale and whose Zigbee quota is consumed; the historical Base issuer does not need to be known in advance.
 
 Existing issuers start with zero Zigbee quota so deployment cannot accidentally grant the new paid feature.
 
@@ -18,9 +19,10 @@ Startup performs an additive migration:
 
 1. The existing SQLite file is backed up once as `instance/my_database.db.pre_zigbee_migration.bak`.
 2. The existing `issuer` table receives `allowed_zigbee_licenses INTEGER NOT NULL DEFAULT 0`.
-3. A separate `instance/zigbee_licenses.db` SQLite database is created with its own `zigbee_licenses` table.
+3. A separate `instance/zigbee_licenses.db` SQLite database is created with `zigbee_licenses` and `zigbee_license_requests` tables.
+4. Existing Zigbee rows receive additive `base_issuer` and `license_type` columns and are preserved as `addon` licenses.
 
-No existing table is replaced and no Base issuer or license row is rewritten. Issuance uses one SQLite `ATTACH` transaction so decrementing the Zigbee quota in the Base database and inserting the entitlement in the Zigbee database succeed or roll back together. Keep both SQLite databases and the Zigbee signing key in the normal backup process.
+No existing table is replaced and no Base issuer or license row is rewritten. Startup makes one pre-workflow backup at `instance/zigbee_licenses.db.pre_workflow_migration.bak`. Issuance and approval use SQLite `ATTACH` transactions so all required quota decrements, license inserts, and request updates succeed or roll back together. Keep both SQLite databases and the Zigbee signing key in the normal backup process.
 
 ## Signing key
 
@@ -38,9 +40,19 @@ ZIGBEE_LICENSE_PRIVATE_KEY_PATH=/run/secrets/zigbee_license_private.pem
 
 The private key must never be committed or copied to the Android app. Losing it prevents reliable reissue after an app reinstall, so it must be backed up securely.
 
-## Activation API
+## New-product activation API
 
-`POST /zigbee/activate` requires:
+`POST /activate` accepts `license_type` with one of:
+
+- `base` (the default, preserving compatibility with existing app versions)
+- `full`, which also requires `coordinator_eui64`
+- `zigbee_only`, which also requires `coordinator_eui64`
+
+Full and Zigbee-only responses include the signed Zigbee entitlement. Repeating an identical Full or Zigbee-only activation restores the existing license without consuming quota again.
+
+## Existing-Base upgrade API
+
+`POST /zigbee/request` requires:
 
 - A fresh device-bound access JWT in `Authorization`.
 - The Android device code.
@@ -57,9 +69,9 @@ Example body:
 }
 ```
 
-The server independently loads the active Base record and derives its issuer, owner, and project. The client cannot select a different issuer for Zigbee activation.
+The server independently loads the active Base record and derives its historical Base issuer, owner, and project. The client cannot select a billing issuer.
 
-For a first request, the endpoint atomically consumes one Zigbee quota and creates a `zigbee_licenses` row. A repeated request for the same panel and coordinator returns the existing entitlement without consuming quota. A request with a different coordinator is rejected and requires an administrative hardware-replacement procedure.
+For a first request, the endpoint creates a pending request and returns HTTP 202. It does not consume any quota. Repeating the same request checks its status. After approval, the same call returns the signed entitlement without consuming quota again. A request with a different coordinator is rejected and requires an administrative hardware-replacement procedure. `/zigbee/activate` remains for installed older app builds: it creates/checks the same request but returns a handled 409 message while pending, then returns the entitlement after approval. Deploy the server before distributing the new Android build.
 
 ## Signed entitlement
 
@@ -70,6 +82,7 @@ The compact signed entitlement includes:
 - Feature name (`zigbee`).
 - Coordinator EUI-64.
 - Stable license ID.
+- Product type (`addon`, `full`, or `zigbee_only`).
 - Issue time.
 - Schema version.
 - Signing-key ID.
@@ -87,17 +100,25 @@ Enforcement is applied at multiple layers:
 - Zigbee Debug remains technician-only and additionally requires the entitlement.
 - `ZigbeeManager.ensureConnected()` verifies both the device and the currently connected coordinator EUI-64 before normal Zigbee operations.
 - The coordinator can be connected only through a special identity-reading path before activation; network formation and normal feature operations remain blocked.
+- A central verified capability gate records the effective product (`base`, `full`, `zigbee_only`, or `unlicensed`) for later UI filtering.
+- Every `RS485Manager` hardware variant rejects both UART initialization and writes unless a valid Base license is present. A Zigbee-only entitlement therefore cannot operate Bus devices even though shared Bus/Zigbee screens remain visible for now.
 
 Debug builds retain the project's existing `SKIP_LICENSE_CHECK` developer behavior. Release builds enforce Zigbee licensing.
 
 ## Administrative workflow
 
-1. Create or edit the issuer and enter its Base quota and Zigbee quota together on the **Issuer** screen.
-2. Ensure the panel already has an active Base license.
-3. On the panel, open Settings > General and select **Request Zigbee feature**.
-4. The app reads the coordinator EUI-64, requests the entitlement, verifies it, and stores it.
-5. Zigbee Manager becomes visible under Settings > Network. Zigbee Debug becomes visible in General Settings while technician mode is active.
-6. Issued entitlements are visible in the separate **Zigbee Licenses** admin screen.
+For a new customer, select Base, Full, or Zigbee-only in the normal registration dialog. Full performs one activation for both features.
+
+For an existing Base customer:
+
+1. On the panel, open Settings > General and select **Request Zigbee feature**.
+2. The app reads the coordinator EUI-64 and sends the Base proof. The screen shows that approval is pending; tapping again checks status.
+3. In the portal, open **Zigbee Requests**. Select the issuer responsible for this Zigbee sale and approve it.
+4. Approval atomically consumes one Zigbee quota from that selected issuer and records both the historical Base issuer and billing issuer.
+5. On the panel, tap **Check Zigbee request**. The app verifies and stores the entitlement.
+6. Zigbee Manager becomes visible under Settings > Network. Zigbee Debug becomes visible in General Settings while technician mode is active.
+
+The **Licenses**, **Zigbee Licenses**, **Issuers**, and **Zigbee Requests** screens are searchable. Issued entitlements remain visible in **Zigbee Licenses**.
 
 Setting a Zigbee license inactive prevents online restoration but does not revoke an entitlement already stored on an offline panel. Supporting revocation would require a signed lease with an expiry and periodic renewal.
 

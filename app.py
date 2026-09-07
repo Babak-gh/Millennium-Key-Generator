@@ -1,8 +1,11 @@
-from flask import Flask, jsonify, request, render_template, redirect, url_for
+from flask import (
+    Flask, jsonify, request, render_template, redirect, url_for, session, flash
+)
 from flask_sqlalchemy import SQLAlchemy
-from flask_admin import Admin, AdminIndexView, expose
+from flask_admin import Admin, AdminIndexView, BaseView, expose
 from flask_admin.contrib.sqla import ModelView
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, or_, text
+from sqlalchemy.exc import IntegrityError
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from Crypto.Signature import PKCS1_v1_5
@@ -12,6 +15,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import jwt
 import csv
 import datetime
@@ -125,6 +129,7 @@ class IssuerAdmin(AuthenticatedModelView):
         'created_date'
     ]
     form_columns = ['issuer', 'allowed_licenses', 'allowed_zigbee_licenses']
+    column_searchable_list = ['issuer', 'created_by']
 
     def on_model_change(self, form, model, is_created):
         if is_created:
@@ -147,6 +152,7 @@ class License(db.Model):
 class LicenseAdmin(AdminOnlyModelView):
     column_list = ['code', 'issuer', 'owner', 'project', 'is_active', 'created_date', 'license']
     form_columns = ['code', 'issuer', 'owner', 'project', 'is_active', 'created_date', 'license']
+    column_searchable_list = ['code', 'issuer', 'owner', 'project']
     can_export = True
     # Use custom template
     list_template = 'admin/license_list.html'
@@ -167,6 +173,8 @@ class ZigbeeLicense(db.Model):
     issuer = db.Column(db.String(120), nullable=False)
     owner = db.Column(db.String(120), nullable=False)
     project = db.Column(db.String(120), nullable=False)
+    base_issuer = db.Column(db.String(120), nullable=True)
+    license_type = db.Column(db.String(24), nullable=False, default='addon')
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_date = db.Column(db.DateTime, nullable=False)
     license = db.Column(db.Text, nullable=False)
@@ -175,11 +183,107 @@ class ZigbeeLicense(db.Model):
 class ZigbeeLicenseAdmin(AdminOnlyModelView):
     column_list = [
         'license_id', 'code', 'coordinator_eui64', 'issuer', 'owner',
-        'project', 'is_active', 'created_date', 'license'
+        'project', 'base_issuer', 'license_type', 'is_active', 'created_date',
+        'license'
     ]
     form_columns = ['is_active']
+    column_searchable_list = [
+        'license_id', 'code', 'coordinator_eui64', 'issuer', 'base_issuer',
+        'owner', 'project', 'license_type'
+    ]
     can_create = False
     can_delete = False
+
+
+class ZigbeeLicenseRequest(db.Model):
+    __bind_key__ = 'zigbee'
+    __tablename__ = 'zigbee_license_requests'
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.String(36), nullable=False, unique=True)
+    code = db.Column(db.String(80), nullable=False, unique=True)
+    coordinator_eui64 = db.Column(db.String(16), nullable=False)
+    base_issuer = db.Column(db.String(120), nullable=True)
+    billing_issuer = db.Column(db.String(120), nullable=True)
+    owner = db.Column(db.String(120), nullable=False)
+    project = db.Column(db.String(120), nullable=False)
+    status = db.Column(db.String(16), nullable=False, default='pending')
+    requested_date = db.Column(db.DateTime, nullable=False)
+    reviewed_date = db.Column(db.DateTime, nullable=True)
+    reviewed_by = db.Column(db.String(150), nullable=True)
+    review_note = db.Column(db.String(500), nullable=True)
+    license_id = db.Column(db.String(36), nullable=True)
+
+
+class ZigbeeLicenseRequestAdmin(BaseView):
+    def is_accessible(self):
+        return current_user.is_authenticated and current_user.is_admin
+
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('login', next=request.url))
+
+    @expose('/')
+    def index(self):
+        query_text = str(request.args.get('q') or '').strip()
+        status = str(request.args.get('status') or 'pending').strip().lower()
+        query = ZigbeeLicenseRequest.query
+        if status in ('pending', 'approved', 'rejected'):
+            query = query.filter_by(status=status)
+        elif status != 'all':
+            status = 'pending'
+            query = query.filter_by(status=status)
+        if query_text:
+            pattern = f'%{query_text}%'
+            query = query.filter(or_(
+                ZigbeeLicenseRequest.request_id.ilike(pattern),
+                ZigbeeLicenseRequest.code.ilike(pattern),
+                ZigbeeLicenseRequest.coordinator_eui64.ilike(pattern),
+                ZigbeeLicenseRequest.base_issuer.ilike(pattern),
+                ZigbeeLicenseRequest.billing_issuer.ilike(pattern),
+                ZigbeeLicenseRequest.owner.ilike(pattern),
+                ZigbeeLicenseRequest.project.ilike(pattern)
+            ))
+        requests = query.order_by(
+            ZigbeeLicenseRequest.requested_date.desc()
+        ).all()
+        issuers = Issuer.query.order_by(Issuer.issuer.asc()).all()
+        return self.render(
+            'admin/zigbee_requests.html',
+            requests=requests,
+            issuers=issuers,
+            query_text=query_text,
+            selected_status=status,
+            csrf_token=get_admin_csrf_token()
+        )
+
+    @expose('/approve/<int:request_db_id>', methods=['POST'])
+    def approve(self, request_db_id):
+        validate_admin_csrf_token()
+        issuer_id = request.form.get('issuer_id', type=int)
+        if issuer_id is None:
+            flash('Select the issuer whose Zigbee quota should be charged.', 'error')
+            return redirect(url_for('.index'))
+        result, message = approve_zigbee_license_request(
+            request_db_id, issuer_id, current_user.username
+        )
+        flash(message, 'success' if result == 'approved' else 'error')
+        return redirect(url_for('.index'))
+
+    @expose('/reject/<int:request_db_id>', methods=['POST'])
+    def reject(self, request_db_id):
+        validate_admin_csrf_token()
+        license_request = db.session.get(ZigbeeLicenseRequest, request_db_id)
+        if license_request is None:
+            flash('Zigbee request was not found.', 'error')
+        elif license_request.status != 'pending':
+            flash('Only pending Zigbee requests can be rejected.', 'error')
+        else:
+            license_request.status = 'rejected'
+            license_request.reviewed_date = datetime.datetime.now(datetime.timezone.utc)
+            license_request.reviewed_by = current_user.username
+            license_request.review_note = str(request.form.get('review_note') or '').strip() or None
+            db.session.commit()
+            flash('Zigbee request rejected. The issuer quota was not changed.', 'success')
+        return redirect(url_for('.index'))
 
 
 class Version(db.Model):
@@ -259,6 +363,13 @@ def build_dashboard_context():
     active_base_codes = {record.code for record in base_records if record.is_active}
     active_zigbee_codes = {record.code for record in zigbee_records if record.is_active}
     full_codes = active_base_codes & active_zigbee_codes
+    zigbee_only_codes = {
+        record.code for record in zigbee_records
+        if record.is_active and record.license_type == 'zigbee_only'
+    }
+    pending_zigbee_requests = ZigbeeLicenseRequest.query.filter_by(
+        status='pending'
+    ).count()
 
     recent_activity = []
     for record in base_records[:8]:
@@ -311,6 +422,8 @@ def build_dashboard_context():
         'issuer_total': len(issuer_records),
         'full_total': len(full_codes),
         'base_only_total': len(active_base_codes - full_codes),
+        'zigbee_only_total': len(zigbee_only_codes),
+        'pending_zigbee_requests': pending_zigbee_requests,
         'base_quota_remaining': sum(row['base'] for row in quota_rows),
         'zigbee_quota_remaining': sum(row['zigbee'] for row in quota_rows),
         'legacy_issuer_count': sum(
@@ -324,6 +437,9 @@ def build_dashboard_context():
 
 admin.add_view(LicenseAdmin(License, db.session))
 admin.add_view(ZigbeeLicenseAdmin(ZigbeeLicense, db.session, name='Zigbee Licenses'))
+admin.add_view(ZigbeeLicenseRequestAdmin(
+    name='Zigbee Requests', endpoint='zigbee_requests'
+))
 admin.add_view(UserAdmin(User, db.session))
 admin.add_view(IssuerAdmin(Issuer, db.session))
 admin.add_view(VersionAdmin(Version, db.session))
@@ -341,6 +457,24 @@ def migrate_schema():
         with db.engine.begin() as connection:
             connection.execute(text(
                 'ALTER TABLE issuer ADD COLUMN created_date DATETIME'
+            ))
+
+
+def migrate_zigbee_schema():
+    """Add workflow metadata without replacing issued Zigbee records."""
+    zigbee_engine = db.engines['zigbee']
+    columns = {
+        column['name'] for column in inspect(zigbee_engine).get_columns('zigbee_licenses')
+    }
+    with zigbee_engine.begin() as connection:
+        if 'base_issuer' not in columns:
+            connection.execute(text(
+                'ALTER TABLE zigbee_licenses ADD COLUMN base_issuer VARCHAR(120)'
+            ))
+        if 'license_type' not in columns:
+            connection.execute(text(
+                "ALTER TABLE zigbee_licenses ADD COLUMN "
+                "license_type VARCHAR(24) NOT NULL DEFAULT 'addon'"
             ))
 
 
@@ -370,11 +504,24 @@ def backup_database_before_dashboard_migration():
     os.chmod(backup_path, 0o600)
 
 
+def backup_zigbee_database_before_workflow_migration():
+    if not os.path.isfile(ZIGBEE_DATABASE_PATH):
+        return
+    backup_path = f'{ZIGBEE_DATABASE_PATH}.pre_workflow_migration.bak'
+    if os.path.exists(backup_path):
+        return
+    with sqlite3.connect(ZIGBEE_DATABASE_PATH) as source, sqlite3.connect(backup_path) as destination:
+        source.backup(destination)
+    os.chmod(backup_path, 0o600)
+
+
 with app.app_context():
     backup_database_before_zigbee_migration()
     backup_database_before_dashboard_migration()
+    backup_zigbee_database_before_workflow_migration()
     db.create_all()
     migrate_schema()
+    migrate_zigbee_schema()
 
     if not User.query.first():
         hashed_password = bcrypt.generate_password_hash(os.environ.get('ADMIN_PASS', 'default_pass')).decode('utf-8')
@@ -505,6 +652,12 @@ def register_activate_request():
     data = request.json
     code = data.get('code')
     is_new = data.get('new')
+    license_type = str(data.get('license_type') or 'base').lower()
+
+    if license_type in ('full', 'zigbee_only'):
+        return activate_initial_zigbee_product(data, license_type)
+    if license_type != 'base':
+        return jsonify({'error': 'Invalid license type'}), 400
 
     is_manual_license = False
     if not is_new:
@@ -545,7 +698,10 @@ def register_activate_request():
         return jsonify({'error': 'Already activated'}), 403
 
     app.logger.error(encrypted_text)
-    return jsonify({'encrypted_license': encrypted_text})
+    return jsonify({
+        'encrypted_license': encrypted_text,
+        'license_type': 'base'
+    })
 
 def check_code_in_csv(code):
     file_path = '/app/past.csv'
@@ -604,7 +760,9 @@ def zigbee_public_key_response_fields():
     }
 
 
-def create_zigbee_entitlement(license_id, code, coordinator_eui64, issued_at):
+def create_zigbee_entitlement(
+    license_id, code, coordinator_eui64, issued_at, license_type='addon'
+):
     # SQLite returns stored datetimes without timezone information. They were
     # written as UTC, so restore that context before reissuing an entitlement.
     if issued_at.tzinfo is None:
@@ -621,6 +779,7 @@ def create_zigbee_entitlement(license_id, code, coordinator_eui64, issued_at):
         'feature': 'zigbee',
         'coordinator_eui64': coordinator_eui64,
         'license_id': license_id,
+        'license_type': license_type,
         'iat': int(issued_at.timestamp()),
         'schema_version': 1
     }
@@ -642,8 +801,9 @@ def normalize_coordinator_eui64(value):
     return normalized
 
 
-def persist_zigbee_license_with_quota(
+def persist_initial_zigbee_product(
     issuer_id,
+    license_type,
     license_id,
     code,
     coordinator_eui64,
@@ -651,38 +811,56 @@ def persist_zigbee_license_with_quota(
     owner,
     project,
     created_date,
-    entitlement
+    base_entitlement,
+    zigbee_entitlement
 ):
-    """Debit Base DB quota and insert into the Zigbee DB in one SQLite transaction."""
+    """Create Full or Zigbee-only licensing with atomic cross-DB quota use."""
+    needs_base = license_type == 'full'
     connection = sqlite3.connect(BASE_DATABASE_PATH, timeout=30)
     try:
         connection.execute('ATTACH DATABASE ? AS zigbee', (ZIGBEE_DATABASE_PATH,))
         connection.execute('BEGIN IMMEDIATE')
-        quota_update = connection.execute(
+        if needs_base:
+            base_quota = connection.execute(
+                'UPDATE issuer SET allowed_licenses = allowed_licenses - 1 '
+                'WHERE id = ? AND allowed_licenses > 0',
+                (issuer_id,)
+            )
+            if base_quota.rowcount != 1:
+                connection.rollback()
+                return 'no_base_quota'
+
+        zigbee_quota = connection.execute(
             'UPDATE issuer '
             'SET allowed_zigbee_licenses = allowed_zigbee_licenses - 1 '
             'WHERE id = ? AND allowed_zigbee_licenses > 0',
             (issuer_id,)
         )
-        if quota_update.rowcount != 1:
+        if zigbee_quota.rowcount != 1:
             connection.rollback()
-            return 'no_quota'
+            return 'no_zigbee_quota'
 
+        created_value = created_date.astimezone(datetime.timezone.utc) \
+            .replace(tzinfo=None).isoformat(sep=' ')
+        if needs_base:
+            connection.execute(
+                'INSERT INTO licences '
+                '(code, issuer, owner, project, is_active, created_date, license) '
+                'VALUES (?, ?, ?, ?, 1, ?, ?)',
+                (
+                    code, issuer_name, owner, project, created_value,
+                    base_entitlement
+                )
+            )
         connection.execute(
             'INSERT INTO zigbee.zigbee_licenses '
             '(license_id, code, coordinator_eui64, issuer, owner, project, '
-            'is_active, created_date, license) '
-            'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
+            'base_issuer, license_type, is_active, created_date, license) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)',
             (
-                license_id,
-                code,
-                coordinator_eui64,
-                issuer_name,
-                owner,
-                project,
-                created_date.astimezone(datetime.timezone.utc)
-                .replace(tzinfo=None).isoformat(sep=' '),
-                entitlement
+                license_id, code, coordinator_eui64, issuer_name, owner, project,
+                issuer_name if needs_base else None, license_type, created_value,
+                zigbee_entitlement
             )
         )
         connection.commit()
@@ -692,6 +870,100 @@ def persist_zigbee_license_with_quota(
         return 'conflict'
     finally:
         connection.close()
+
+
+def activate_initial_zigbee_product(data, license_type):
+    code = str(data.get('code') or '').strip()
+    coordinator_eui64 = normalize_coordinator_eui64(data.get('coordinator_eui64'))
+    issuer_name = str(data.get('issuer') or '').strip()
+    owner = str(data.get('owner') or '').strip()
+    project = str(data.get('project') or '').strip()
+
+    if not code or len(code) > 80:
+        return jsonify({'error': 'Invalid device ID'}), 400
+    if coordinator_eui64 is None:
+        return jsonify({'error': 'A valid Zigbee coordinator EUI-64 is required'}), 400
+    _, token_error = decode_zigbee_device_access_token(code)
+    if token_error:
+        message, status = token_error
+        return jsonify({'error': message}), status
+    issuer = Issuer.query.filter_by(issuer=issuer_name).first()
+    if issuer is None:
+        return jsonify({'error': 'You are not allowed to get a license'}), 403
+    existing_base = License.query.filter_by(code=code).first()
+    existing_zigbee = ZigbeeLicense.query.filter_by(code=code).first()
+    if existing_base is not None or existing_zigbee is not None:
+        expected_base = license_type == 'full'
+        can_restore = (
+            existing_zigbee is not None and existing_zigbee.is_active and
+            existing_zigbee.license_type == license_type and
+            hmac.compare_digest(existing_zigbee.coordinator_eui64, coordinator_eui64) and
+            ((not expected_base and existing_base is None) or (
+                expected_base and existing_base is not None and existing_base.is_active
+            ))
+        )
+        if not can_restore:
+            return jsonify({'error': 'This device already has a different license record'}), 409
+        if not hmac.compare_digest(existing_zigbee.issuer, issuer_name):
+            return jsonify({'error': 'This license belongs to a different issuer'}), 403
+
+        restored_base = sign_device_id(code) if expected_base else None
+        existing_zigbee.license = create_zigbee_entitlement(
+            existing_zigbee.license_id, code, coordinator_eui64,
+            existing_zigbee.created_date, existing_zigbee.license_type
+        )
+        if expected_base:
+            existing_base.license = restored_base
+        db.session.commit()
+        response = {
+            'status': 'approved',
+            'license_type': license_type,
+            'encrypted_license': restored_base,
+            'zigbee_license': existing_zigbee.license,
+            'coordinator_eui64': coordinator_eui64,
+            'already_licensed': True
+        }
+        response.update(zigbee_public_key_response_fields())
+        return jsonify(response), 200
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    license_id = str(uuid.uuid4())
+    base_entitlement = sign_device_id(code) if license_type == 'full' else None
+    zigbee_entitlement = create_zigbee_entitlement(
+        license_id, code, coordinator_eui64, now, license_type
+    )
+    issuer_id = issuer.id
+    db.session.rollback()
+    result = persist_initial_zigbee_product(
+        issuer_id=issuer_id,
+        license_type=license_type,
+        license_id=license_id,
+        code=code,
+        coordinator_eui64=coordinator_eui64,
+        issuer_name=issuer_name,
+        owner=owner,
+        project=project,
+        created_date=now,
+        base_entitlement=base_entitlement,
+        zigbee_entitlement=zigbee_entitlement
+    )
+    if result == 'no_base_quota':
+        return jsonify({'error': 'You do not have enough Base licenses'}), 403
+    if result == 'no_zigbee_quota':
+        return jsonify({'error': 'You do not have enough Zigbee licenses'}), 403
+    if result == 'conflict':
+        return jsonify({'error': 'This device or coordinator is already licensed'}), 409
+
+    response = {
+        'status': 'approved',
+        'license_type': license_type,
+        'encrypted_license': base_entitlement,
+        'zigbee_license': zigbee_entitlement,
+        'coordinator_eui64': coordinator_eui64,
+        'already_licensed': False
+    }
+    response.update(zigbee_public_key_response_fields())
+    return jsonify(response), 201
 
 
 def decode_zigbee_device_access_token(code):
@@ -715,16 +987,153 @@ def decode_zigbee_device_access_token(code):
 
 def zigbee_activation_response(zigbee_license, already_licensed):
     response = {
+        'status': 'approved',
         'zigbee_license': zigbee_license.license,
         'coordinator_eui64': zigbee_license.coordinator_eui64,
+        'license_type': zigbee_license.license_type,
         'already_licensed': already_licensed
     }
     response.update(zigbee_public_key_response_fields())
     return jsonify(response)
 
 
+def get_admin_csrf_token():
+    token = session.get('admin_csrf_token')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['admin_csrf_token'] = token
+    return token
+
+
+def validate_admin_csrf_token():
+    expected = str(session.get('admin_csrf_token') or '')
+    supplied = str(request.form.get('csrf_token') or '')
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        from flask import abort
+        abort(400, description='Invalid CSRF token')
+
+
+def zigbee_request_response(license_request, status_code=200):
+    messages = {
+        'pending': 'Your Zigbee license request is waiting for administrator approval.',
+        'rejected': 'Your Zigbee license request was rejected. You can submit it again.',
+        'approved': 'Your Zigbee license request was approved.'
+    }
+    payload = {
+        'status': license_request.status,
+        'request_id': license_request.request_id,
+        'coordinator_eui64': license_request.coordinator_eui64,
+        'message': messages.get(license_request.status, 'Zigbee request status is unknown.')
+    }
+    # App releases before the approval workflow expect every successful
+    # /zigbee/activate response to contain a complete entitlement. Return a
+    # handled error while pending so those installed versions show a message
+    # instead of dereferencing missing response fields.
+    if request.path == '/zigbee/activate' and license_request.status != 'approved':
+        payload['error'] = payload['message']
+        return jsonify(payload), 409
+    return jsonify(payload), status_code
+
+
+def persist_approved_zigbee_request(
+    request_db_id, issuer_id, reviewer, license_id, entitlement, reviewed_date
+):
+    """Charge the chosen issuer and approve the request in one transaction."""
+    connection = sqlite3.connect(BASE_DATABASE_PATH, timeout=30)
+    try:
+        connection.execute('ATTACH DATABASE ? AS zigbee', (ZIGBEE_DATABASE_PATH,))
+        connection.execute('BEGIN IMMEDIATE')
+        request_row = connection.execute(
+            'SELECT request_id, code, coordinator_eui64, base_issuer, owner, project, status '
+            'FROM zigbee.zigbee_license_requests WHERE id = ?',
+            (request_db_id,)
+        ).fetchone()
+        if request_row is None:
+            connection.rollback()
+            return 'missing'
+        if request_row[6] != 'pending':
+            connection.rollback()
+            return 'not_pending'
+
+        issuer_row = connection.execute(
+            'SELECT issuer FROM issuer WHERE id = ?', (issuer_id,)
+        ).fetchone()
+        if issuer_row is None:
+            connection.rollback()
+            return 'missing_issuer'
+        quota_update = connection.execute(
+            'UPDATE issuer SET allowed_zigbee_licenses = allowed_zigbee_licenses - 1 '
+            'WHERE id = ? AND allowed_zigbee_licenses > 0',
+            (issuer_id,)
+        )
+        if quota_update.rowcount != 1:
+            connection.rollback()
+            return 'no_quota'
+
+        created_value = reviewed_date.astimezone(datetime.timezone.utc) \
+            .replace(tzinfo=None).isoformat(sep=' ')
+        connection.execute(
+            'INSERT INTO zigbee.zigbee_licenses '
+            '(license_id, code, coordinator_eui64, issuer, owner, project, '
+            'base_issuer, license_type, is_active, created_date, license) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)',
+            (
+                license_id, request_row[1], request_row[2], issuer_row[0],
+                request_row[4], request_row[5], request_row[3], 'addon',
+                created_value, entitlement
+            )
+        )
+        updated = connection.execute(
+            'UPDATE zigbee.zigbee_license_requests '
+            'SET status = ?, billing_issuer = ?, reviewed_date = ?, reviewed_by = ?, '
+            'license_id = ? WHERE id = ? AND status = ?',
+            (
+                'approved', issuer_row[0], created_value, reviewer, license_id,
+                request_db_id, 'pending'
+            )
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            return 'not_pending'
+        connection.commit()
+        return 'approved'
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return 'conflict'
+    finally:
+        connection.close()
+
+
+def approve_zigbee_license_request(request_db_id, issuer_id, reviewer):
+    license_request = db.session.get(ZigbeeLicenseRequest, request_db_id)
+    if license_request is None:
+        return 'missing', 'Zigbee request was not found.'
+    if license_request.status != 'pending':
+        return 'not_pending', 'Only pending Zigbee requests can be approved.'
+    now = datetime.datetime.now(datetime.timezone.utc)
+    license_id = str(uuid.uuid4())
+    entitlement = create_zigbee_entitlement(
+        license_id, license_request.code, license_request.coordinator_eui64,
+        now, 'addon'
+    )
+    db.session.rollback()
+    result = persist_approved_zigbee_request(
+        request_db_id, issuer_id, reviewer, license_id, entitlement, now
+    )
+    messages = {
+        'approved': 'Zigbee request approved and one Zigbee quota was consumed.',
+        'missing': 'Zigbee request was not found.',
+        'not_pending': 'Only pending Zigbee requests can be approved.',
+        'missing_issuer': 'The selected issuer no longer exists.',
+        'no_quota': 'The selected issuer has no Zigbee quota remaining.',
+        'conflict': 'This device or coordinator already has a Zigbee license.'
+    }
+    return result, messages[result]
+
+
+@app.route('/zigbee/request', methods=['POST'])
 @app.route('/zigbee/activate', methods=['POST'])
-def activate_zigbee_feature():
+def request_zigbee_feature():
     data = request.get_json(silent=True) or {}
     code = str(data.get('code') or '').strip()
     coordinator_eui64 = normalize_coordinator_eui64(data.get('coordinator_eui64'))
@@ -761,50 +1170,74 @@ def activate_zigbee_feature():
             existing.license_id,
             existing.code,
             existing.coordinator_eui64,
-            existing.created_date
+            existing.created_date,
+            existing.license_type
         )
         db.session.commit()
         return zigbee_activation_response(existing, already_licensed=True)
 
-    issuer = Issuer.query.filter_by(issuer=base_license.issuer).first()
-    if issuer is None:
-        return jsonify({'error': 'The Base license issuer no longer exists'}), 403
+    existing_request = ZigbeeLicenseRequest.query.filter_by(code=code).first()
+    if existing_request is not None:
+        if not hmac.compare_digest(
+            existing_request.coordinator_eui64, coordinator_eui64
+        ):
+            return jsonify({
+                'error': 'This device requested a license for a different Zigbee coordinator'
+            }), 409
+        if existing_request.status == 'approved':
+            approved_license = ZigbeeLicense.query.filter_by(
+                license_id=existing_request.license_id
+            ).first()
+            if approved_license is not None and approved_license.is_active:
+                return zigbee_activation_response(
+                    approved_license, already_licensed=True
+                )
+        if existing_request.status == 'rejected':
+            existing_request.status = 'pending'
+            existing_request.requested_date = datetime.datetime.now(datetime.timezone.utc)
+            existing_request.billing_issuer = None
+            existing_request.reviewed_date = None
+            existing_request.reviewed_by = None
+            existing_request.review_note = None
+            existing_request.license_id = None
+            db.session.commit()
+            return zigbee_request_response(existing_request, 202)
+        return zigbee_request_response(
+            existing_request, 202 if existing_request.status == 'pending' else 409
+        )
 
-    now = datetime.datetime.now(datetime.timezone.utc)
-    license_id = str(uuid.uuid4())
-    entitlement = create_zigbee_entitlement(license_id, code, coordinator_eui64, now)
-    issuer_id = issuer.id
-    issuer_name = base_license.issuer
-    owner = base_license.owner
-    project = base_license.project
+    coordinator_request = ZigbeeLicenseRequest.query.filter_by(
+        coordinator_eui64=coordinator_eui64, status='pending'
+    ).first()
+    if coordinator_request is not None:
+        return jsonify({
+            'error': 'This Zigbee coordinator already has a pending license request'
+        }), 409
 
-    # End the ORM read transactions before opening the cross-database write.
-    db.session.rollback()
-    persistence_result = persist_zigbee_license_with_quota(
-        issuer_id=issuer_id,
-        license_id=license_id,
+    license_request = ZigbeeLicenseRequest(
+        request_id=str(uuid.uuid4()),
         code=code,
         coordinator_eui64=coordinator_eui64,
-        issuer_name=issuer_name,
-        owner=owner,
-        project=project,
-        created_date=now,
-        entitlement=entitlement
+        base_issuer=base_license.issuer,
+        owner=base_license.owner,
+        project=base_license.project,
+        status='pending',
+        requested_date=datetime.datetime.now(datetime.timezone.utc)
     )
-    if persistence_result == 'no_quota':
-        return jsonify({'error': 'No Zigbee licenses are available for this issuer'}), 403
-    if persistence_result == 'conflict':
-        # A concurrent duplicate request should get the already-issued license
-        # rather than consume a second quota unit.
-        existing = ZigbeeLicense.query.filter_by(code=code).first()
-        if existing is not None and existing.is_active and hmac.compare_digest(
-            existing.coordinator_eui64, coordinator_eui64
+    db.session.add(license_request)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        concurrent = ZigbeeLicenseRequest.query.filter_by(code=code).first()
+        if concurrent is not None and hmac.compare_digest(
+            concurrent.coordinator_eui64, coordinator_eui64
         ):
-            return zigbee_activation_response(existing, already_licensed=True)
-        return jsonify({'error': 'Zigbee activation conflicted with another request'}), 409
-
-    new_license = ZigbeeLicense.query.filter_by(license_id=license_id).one()
-    return zigbee_activation_response(new_license, already_licensed=False), 201
+            return zigbee_request_response(
+                concurrent, 202 if concurrent.status == 'pending' else 200
+            )
+        return jsonify({'error': 'Zigbee request conflicted with another request'}), 409
+    return zigbee_request_response(license_request, 202)
 
 
 @app.route('/admin/license/export_excel')

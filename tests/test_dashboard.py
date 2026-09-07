@@ -86,7 +86,21 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('Zigbee licenses created over time', page)
         self.assertIn('Issuers created over time', page)
         self.assertIn('Dashboard Full Owner', page)
-        self.assertIn('Full / Base-only', page)
+        self.assertIn('Full / Base / Zigbee', page)
+
+        searchable_pages = [
+            '/admin/license/?search=dashboard-test',
+            '/admin/zigbeelicense/?search=dashboard-test',
+            '/admin/issuer/?search=dashboard-test',
+            '/admin/zigbee_requests/?q=dashboard-test&status=all'
+        ]
+        for url in searchable_pages:
+            search_response = self.client.get(url)
+            self.assertEqual(search_response.status_code, 200, url)
+        request_page = self.client.get('/admin/zigbee_requests/')
+        self.assertIn(
+            'Choose the billing issuer', request_page.get_data(as_text=True)
+        )
 
 
 if __name__ == '__main__':
