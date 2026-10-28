@@ -11,6 +11,8 @@ services:
       - "8000:8000"
     environment:
       - FLASK_ENV=production
+      - LICENSING_SERVICE_TOKEN=${LICENSING_SERVICE_TOKEN:-}
+      - CLOUD_LICENSING_URL=${CLOUD_LICENSING_URL:-}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_PASS=${ADMIN_PASS}

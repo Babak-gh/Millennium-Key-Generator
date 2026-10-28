@@ -3,8 +3,10 @@
 {% block body %}
     <div style="margin-bottom: 10px;">
         <a href="{{ export_url }}" class="btn btn-success btn-sm">
-            <span class="glyphicon glyphicon-export"></span> Export to Excel
+            <span class="glyphicon glyphicon-export"></span> Export Base inventory (not a bill)
         </a>
+        <a href="{{ url_for('export_billing_reconciliation') }}" class="btn btn-primary btn-sm">Export billing reconciliation (Bus + Zigbee)</a>
+        <p>Use billing reconciliation before collecting payment. Inventory exports do not check cloud payments.</p>
     </div>
     {{ super() }}
 {% endblock %}

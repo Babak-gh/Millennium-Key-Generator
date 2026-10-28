@@ -30,7 +30,8 @@ import io
 from flask import send_file
 
 
-app = Flask(__name__)
+app = Flask(__name__, instance_path=os.environ.get("LICENSING_INSTANCE_PATH"))
+os.makedirs(app.instance_path, exist_ok=True)
 
 BASE_DATABASE_PATH = os.path.join(app.instance_path, 'my_database.db')
 ZIGBEE_DATABASE_PATH = os.path.join(app.instance_path, 'zigbee_licenses.db')
@@ -1239,6 +1240,70 @@ def request_zigbee_feature():
         return jsonify({'error': 'Zigbee request conflicted with another request'}), 409
     return zigbee_request_response(license_request, 202)
 
+
+
+def billing_license_record(row, feature):
+    return {
+        'key': f'BASE:{row.id}' if feature == 'BUS' else f'ZIGBEE:{row.license_id}',
+        'code': row.code, 'feature': feature, 'issuer': row.issuer,
+        'active': bool(row.is_active),
+    }
+
+
+@app.route('/internal/cloud/licenses')
+def cloud_license_lookup():
+    token = os.environ.get('LICENSING_SERVICE_TOKEN', '')
+    supplied = request.headers.get('Authorization', '').removeprefix('Bearer ')
+    if len(token) < 32 or not hmac.compare_digest(token, supplied):
+        return jsonify({'error': 'Unauthorized'}), 401
+    code = request.args.get('code', '').strip()
+    if not code or len(code) > 80:
+        return jsonify({'error': 'Invalid panel code'}), 400
+    base = License.query.filter_by(code=code).first()
+    zigbee = ZigbeeLicense.query.filter_by(code=code).first()
+    return jsonify({'licenses': [billing_license_record(row, feature)
+                    for row, feature in ((base, 'BUS'), (zigbee, 'ZIGBEE')) if row]})
+
+
+@app.route('/admin/license/export_billing')
+@login_required
+def export_billing_reconciliation():
+    if not current_user.is_admin:
+        return jsonify({'error': 'Only an administrator can export billing records'}), 403
+    from cloud_billing import ReconciliationUnavailable, reconcile_cloud_coverage, excel_text
+    records = [(row, 'BUS') for row in License.query.all()]
+    records += [(row, 'ZIGBEE') for row in ZigbeeLicense.query.all()]
+    licenses = [billing_license_record(row, feature) for row, feature in records]
+    try:
+        coverage = reconcile_cloud_coverage(licenses)
+    except ReconciliationUnavailable as error:
+        return jsonify({'error': str(error)}), 503
+    data = []
+    for (row, feature), license_record in zip(records, licenses):
+        result = coverage[license_record['key']]
+        status = result['status']
+        data.append({
+            'License ID': license_record['key'], 'Panel Code': row.code,
+            'Feature': feature, 'Issuer': row.issuer, 'Owner': row.owner, 'Project': row.project,
+            'Active': 'Yes' if row.is_active else 'No', 'Cloud Settlement': status,
+            'Cloud Home': result.get('homeId', ''), 'Cloud Payment': result.get('paymentId', ''),
+            'Payment Reference': result.get('reference', ''),
+            'Collection Action': 'Covered - do not bill' if status == 'COVERED_BY_CLOUD' else
+                'Hold - review cloud purchase' if status == 'REVIEW_REQUIRED' else
+                'Check existing offline payments before collection' if row.is_active else 'Inactive - review',
+        })
+    columns = ['License ID', 'Panel Code', 'Feature', 'Issuer', 'Owner', 'Project', 'Active',
+               'Cloud Settlement', 'Cloud Home', 'Cloud Payment', 'Payment Reference', 'Collection Action']
+    df = pd.DataFrame([{key: excel_text(value) for key, value in row.items()} for row in data], columns=columns)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='All licenses')
+        df[(df['Cloud Settlement'] == 'NOT_COVERED') & (df['Active'] == 'Yes')].to_excel(
+            writer, index=False, sheet_name='Offline payment review')
+        df[df['Cloud Settlement'] == 'REVIEW_REQUIRED'].to_excel(writer, index=False, sheet_name='Cloud review required')
+    output.seek(0)
+    return send_file(output, as_attachment=True, download_name='license_billing_reconciliation.xlsx',
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/admin/license/export_excel')
 @login_required
